@@ -16,7 +16,6 @@ package fs
 
 import (
 	"fmt"
-	"github.com/cubefs/cubefs/util/auditlog"
 	"io"
 	"os"
 	"strconv"
@@ -24,6 +23,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/cubefs/cubefs/util/auditlog"
 
 	"github.com/cubefs/cubefs/depends/bazil.org/fuse"
 	"github.com/cubefs/cubefs/depends/bazil.org/fuse/fs"
@@ -38,9 +39,17 @@ import (
 	"github.com/cubefs/cubefs/util/log"
 )
 
+// states of DirContext.ReadState
+var (
+	INIT_STATUS                = 0
+	READ_FROM_REMOTE           = 1
+	READ_FROM_PERSISETNT_CACHE = 2
+)
+
 // used to locate the position in parent
 type DirContext struct {
-	Name string
+	Name      string
+	ReadState int // -1 should be set if we read from the remote, 1 should be set if we read from the remote
 }
 
 type DirContexts struct {
@@ -60,7 +69,7 @@ func (dctx *DirContexts) GetCopy(handle fuse.HandleID) DirContext {
 	dctx.RUnlock()
 
 	if found {
-		return DirContext{dirCtx.Name}
+		return DirContext{dirCtx.Name, dirCtx.ReadState}
 	} else {
 		return DirContext{}
 	}
@@ -73,6 +82,7 @@ func (dctx *DirContexts) Put(handle fuse.HandleID, dirCtx *DirContext) {
 	oldCtx, found := dctx.dirCtx[handle]
 	if found {
 		oldCtx.Name = dirCtx.Name
+		oldCtx.ReadState = dirCtx.ReadState
 		return
 	}
 
@@ -310,12 +320,25 @@ func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.Lo
 		if dentryInfo == nil {
 			lookupMetric := exporter.NewCounter("lookupDcacheMiss")
 			lookupMetric.AddWithLabels(1, map[string]string{exporter.Vol: d.super.volname})
-			ino, _, err = d.super.mw.Lookup_ll(d.info.Inode, req.Name)
-			if err != nil {
-				if err != syscall.ENOENT {
-					log.LogErrorf("Lookup: parent(%v) name(%v) err(%v)", d.info.Inode, req.Name, err)
+
+			lookupFromRemote := true
+			if d.super.rdOnlyMetaCache != nil {
+				ino, err = d.super.rdOnlyMetaCache.Lookup(d.info.Inode, req.Name)
+				if err == nil || err == DENTRY_NOT_EXIST {
+					lookupFromRemote = false
 				}
-				return nil, ParseError(err)
+				if err == DENTRY_NOT_EXIST {
+					return nil, ParseError(syscall.ENOENT)
+				}
+			}
+			if lookupFromRemote {
+				ino, _, err = d.super.mw.Lookup_ll(d.info.Inode, req.Name)
+				if err != nil {
+					if err != syscall.ENOENT {
+						log.LogErrorf("Lookup: parent(%v) name(%v) err(%v)", d.info.Inode, req.Name, err)
+					}
+					return nil, ParseError(err)
+				}
 			}
 			info := &proto.DentryInfo{
 				Name:  dcacheKey,
@@ -330,12 +353,24 @@ func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.Lo
 	} else {
 		cino, ok := d.dcache.Get(req.Name)
 		if !ok {
-			cino, _, err = d.super.mw.Lookup_ll(d.info.Inode, req.Name)
-			if err != nil {
-				if err != syscall.ENOENT {
-					log.LogErrorf("Lookup: parent(%v) name(%v) err(%v)", d.info.Inode, req.Name, err)
+			clookupFromRemote := true
+			if d.super.rdOnlyMetaCache != nil {
+				cino, err = d.super.rdOnlyMetaCache.Lookup(d.info.Inode, req.Name)
+				if err == nil || err == DENTRY_NOT_EXIST {
+					clookupFromRemote = false
 				}
-				return nil, ParseError(err)
+				if err == DENTRY_NOT_EXIST {
+					return nil, ParseError(syscall.ENOENT)
+				}
+			}
+			if clookupFromRemote {
+				cino, _, err = d.super.mw.Lookup_ll(d.info.Inode, req.Name)
+				if err != nil {
+					if err != syscall.ENOENT {
+						log.LogErrorf("Lookup: parent(%v) name(%v) err(%v)", d.info.Inode, req.Name, err)
+					}
+					return nil, ParseError(err)
+				}
 			}
 		}
 		ino = cino
@@ -385,21 +420,51 @@ func (d *Dir) ReadDir(ctx context.Context, req *fuse.ReadRequest, resp *fuse.Rea
 	}()
 
 	dirCtx := d.dctx.GetCopy(req.Handle)
-	children, err := d.super.mw.ReadDirLimit_ll(d.info.Inode, dirCtx.Name, limit)
-	if err != nil {
-		log.LogErrorf("readdirlimit: Readdir: ino(%v) err(%v)", d.info.Inode, err)
-		return make([]fuse.Dirent, 0), ParseError(err)
+	var children []proto.Dentry
+	RdOnlyCacheHit := false
+	if dirCtx.ReadState == INIT_STATUS {
+		if d.super.rdOnlyMetaCache != nil {
+			children, err = d.super.rdOnlyMetaCache.GetDentry(d.info.Inode)
+			if err == nil {
+				dirCtx.ReadState = READ_FROM_PERSISETNT_CACHE // we have get all entries from readOnlyCache
+				RdOnlyCacheHit = true
+			} else {
+				dirCtx.ReadState = READ_FROM_REMOTE // readOnlyCache miss, we should read from the remote
+			}
+		} else {
+			dirCtx.ReadState = READ_FROM_REMOTE
+		}
+	} else if dirCtx.ReadState == READ_FROM_PERSISETNT_CACHE {
+		return make([]fuse.Dirent, 0), io.EOF
 	}
-
+	if dirCtx.ReadState == READ_FROM_REMOTE {
+		children, err = d.super.mw.ReadDirLimit_ll(d.info.Inode, dirCtx.Name, limit)
+		if err != nil {
+			log.LogErrorf("readdirlimit: Readdir: ino(%v) err(%v)", d.info.Inode, err)
+			return make([]fuse.Dirent, 0), ParseError(err)
+		}
+	}
 	// skip the first one, which is already accessed
 	childrenNr := uint64(len(children))
 	if childrenNr == 0 || (dirCtx.Name != "" && childrenNr == 1) {
+		if d.super.rdOnlyMetaCache != nil && !RdOnlyCacheHit {
+			d.super.rdOnlyMetaCache.PutDentry(d.info.Inode, []proto.Dentry{}, true)
+		}
 		return make([]fuse.Dirent, 0), io.EOF
 	} else if childrenNr < limit {
+		err = io.EOF
+	} else if RdOnlyCacheHit {
 		err = io.EOF
 	}
 	if dirCtx.Name != "" {
 		children = children[1:]
+	}
+	if d.super.rdOnlyMetaCache != nil && !RdOnlyCacheHit {
+		if err != io.EOF {
+			d.super.rdOnlyMetaCache.PutDentry(d.info.Inode, children, false)
+		} else {
+			d.super.rdOnlyMetaCache.PutDentry(d.info.Inode, children, true)
+		}
 	}
 
 	/* update dirCtx */
@@ -439,10 +504,14 @@ func (d *Dir) ReadDir(ctx context.Context, req *fuse.ReadRequest, resp *fuse.Rea
 			dcache.Put(child.Name, child.Inode)
 		}
 	}
-
-	infos := d.super.mw.BatchInodeGet(inodes)
-	for _, info := range infos {
-		d.super.ic.Put(info)
+	if d.super.rdOnlyMetaCache == nil || !RdOnlyCacheHit { // if we open rdOnlyCache and cache hit, we don't prefecth attr
+		infos := d.super.mw.BatchInodeGet(inodes)
+		for _, info := range infos {
+			d.super.ic.Put(info)
+			if d.super.rdOnlyMetaCache != nil {
+				d.super.rdOnlyMetaCache.PutAttr(info)
+			}
+		}
 	}
 
 	d.dcache = dcache
@@ -466,24 +535,36 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	var noMore = false
 	var from = ""
 	var children []proto.Dentry
-	for !noMore {
-		batches, err := d.super.mw.ReadDirLimit_ll(d.info.Inode, from, DefaultReaddirLimit)
-		if err != nil {
-			log.LogErrorf("Readdir: ino(%v) err(%v) from(%v)", d.info.Inode, err, from)
-			return make([]fuse.Dirent, 0), ParseError(err)
+	RdOnlyCacheHit := false
+	ReaddirFromRemote := true
+
+	if d.super.rdOnlyMetaCache != nil {
+		children, err = d.super.rdOnlyMetaCache.GetDentry(d.info.Inode)
+		if err == nil {
+			RdOnlyCacheHit = true
+			ReaddirFromRemote = false
 		}
-		batchNr := uint64(len(batches))
-		if batchNr == 0 || (from != "" && batchNr == 1) {
-			noMore = true
-			break
-		} else if batchNr < DefaultReaddirLimit {
-			noMore = true
+	}
+	if ReaddirFromRemote {
+		for !noMore {
+			batches, err := d.super.mw.ReadDirLimit_ll(d.info.Inode, from, DefaultReaddirLimit)
+			if err != nil {
+				log.LogErrorf("Readdir: ino(%v) err(%v) from(%v)", d.info.Inode, err, from)
+				return make([]fuse.Dirent, 0), ParseError(err)
+			}
+			batchNr := uint64(len(batches))
+			if batchNr == 0 || (from != "" && batchNr == 1) {
+				noMore = true
+				break
+			} else if batchNr < DefaultReaddirLimit {
+				noMore = true
+			}
+			if from != "" {
+				batches = batches[1:]
+			}
+			children = append(children, batches...)
+			from = batches[len(batches)-1].Name
 		}
-		if from != "" {
-			batches = batches[1:]
-		}
-		children = append(children, batches...)
-		from = batches[len(batches)-1].Name
 	}
 
 	inodes := make([]uint64, 0, len(children))
@@ -520,9 +601,18 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		}
 	}
 
-	infos := d.super.mw.BatchInodeGet(inodes)
-	for _, info := range infos {
-		d.super.ic.Put(info)
+	if d.super.rdOnlyMetaCache != nil && !RdOnlyCacheHit {
+		d.super.rdOnlyMetaCache.PutDentry(d.info.Inode, children, true)
+	}
+
+	if d.super.rdOnlyMetaCache == nil || !RdOnlyCacheHit { // if we open rdOnlyCache and cache hit, we don't prefecth attr
+		infos := d.super.mw.BatchInodeGet(inodes)
+		for _, info := range infos {
+			d.super.ic.Put(info)
+			if d.super.rdOnlyMetaCache != nil {
+				d.super.rdOnlyMetaCache.PutAttr(info)
+			}
+		}
 	}
 	d.dcache = dcache
 	elapsed := time.Since(start)

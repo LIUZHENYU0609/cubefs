@@ -33,17 +33,31 @@ func (s *Super) InodeGet(ino uint64) (*proto.InodeInfo, error) {
 		return info, nil
 	}
 
-	info, err := s.mw.InodeGet_ll(ino)
-	if err != nil || info == nil {
-		log.LogErrorf("InodeGet: ino(%v) err(%v) info(%v)", ino, err, info)
-		if err != nil {
-			return nil, ParseError(err)
-		} else {
-			return nil, fuse.ENOENT
+	getAttrFromRemote := true
+	info = &proto.InodeInfo{}
+	var err error
+	if s.rdOnlyMetaCache != nil {
+		info = &proto.InodeInfo{}
+		if err := s.rdOnlyMetaCache.GetAttr(ino, info); err == nil {
+			getAttrFromRemote = false
+		}
+	}
+	if getAttrFromRemote {
+		info, err = s.mw.InodeGet_ll(ino)
+		if err != nil || info == nil {
+			log.LogErrorf("InodeGet: ino(%v) err(%v) info(%v)", ino, err, info)
+			if err != nil {
+				return nil, ParseError(err)
+			} else {
+				return nil, fuse.ENOENT
+			}
 		}
 	}
 	s.ic.Put(info)
 	s.ec.RefreshExtentsCache(ino)
+	if s.rdOnlyMetaCache != nil {
+		s.rdOnlyMetaCache.PutAttr(info)
+	}
 	return info, nil
 }
 
