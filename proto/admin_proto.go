@@ -14,7 +14,9 @@
 
 package proto
 
-import "github.com/cubefs/cubefs/util"
+import (
+	"github.com/cubefs/cubefs/util"
+)
 
 // api
 const (
@@ -59,12 +61,22 @@ const (
 	AdminUpdateZoneExcludeRatio               = "/admin/updateZoneExcludeRatio"
 	AdminSetNodeRdOnly                        = "/admin/setNodeRdOnly"
 	AdminSetDpRdOnly                          = "/admin/setDpRdOnly"
+	AdminSetConfig                            = "/admin/setConfig"
+	AdminGetConfig                            = "/admin/getConfig"
 	AdminDataPartitionChangeLeader            = "/dataPartition/changeleader"
 	AdminChangeMasterLeader                   = "/master/changeleader"
 	AdminOpFollowerPartitionsRead             = "/master/opFollowerPartitionRead"
 	AdminUpdateDecommissionLimit              = "/admin/updateDecommissionLimit"
 	AdminQueryDecommissionLimit               = "/admin/queryDecommissionLimit"
 	AdminQueryDecommissionToken               = "/admin/queryDecommissionToken"
+	AdminSetFileStats                         = "/admin/setFileStatsEnable"
+	AdminGetFileStats                         = "/admin/getFileStatsEnable"
+	AdminGetClusterValue                      = "/admin/getClusterValue"
+	AdminSetClusterUuidEnable                 = "/admin/setClusterUuidEnable"
+	AdminGetClusterUuid                       = "/admin/getClusterUuid"
+	AdminGenerateClusterUuid                  = "/admin/generateClusterUuid"
+	AdminSetDpDiscard                         = "/admin/setDpDiscard"
+
 	//graphql master api
 	AdminClusterAPI = "/api/cluster"
 	AdminUserAPI    = "/api/user"
@@ -96,12 +108,18 @@ const (
 	QosUpload              = "/admin/qosUpload"
 	QosUpdateMasterLimit   = "/qos/masterLimit"
 
+	// acl api
+	AdminACL = "/admin/aclOp"
+	// uid api
+	AdminUid = "/admin/uidOp"
+
 	//raft node APIs
 	AddRaftNode    = "/raftNode/add"
 	RemoveRaftNode = "/raftNode/remove"
 	RaftStatus     = "/get/raftStatus"
 
 	// node APIs
+
 	AddDataNode                        = "/dataNode/add"
 	DecommissionDataNode               = "/dataNode/decommission"
 	QueryDataNodeDecoProgress          = "/dataNode/queryDecommissionProgress"
@@ -114,6 +132,7 @@ const (
 	MarkDecoDiskFixed                  = "/disk/MarkDecommissionDiskFixed"
 	CancelDecommissionDisk             = "/disk/cancelDecommission"
 	QueryDecommissionDiskDecoFailedDps = "/disk/queryDecommissionFailedDps"
+	QueryBadDisks                      = "/disk/queryBadDisks"
 	GetDataNode                        = "/dataNode/get"
 	AddMetaNode                        = "/metaNode/add"
 	DecommissionMetaNode               = "/metaNode/decommission"
@@ -126,8 +145,10 @@ const (
 	AdminDiagnoseMetaPartition         = "/metaPartition/diagnose"
 	AdminDecommissionMetaPartition     = "/metaPartition/decommission"
 	AdminChangeMetaPartitionLeader     = "/metaPartition/changeleader"
+	AdminBalanceMetaPartitionLeader    = "/metaPartition/balanceLeader"
 	AdminAddMetaReplica                = "/metaReplica/add"
 	AdminDeleteMetaReplica             = "/metaReplica/delete"
+	AdminPutDataPartitions             = "/dataPartitions/set"
 
 	// Operation response
 	GetMetaNodeTaskResponse = "/metaNode/response" // Method: 'POST', ContentType: 'application/json'
@@ -158,6 +179,14 @@ const (
 	ParamAuthorized = "_authorization"
 	UserKey         = "_user_key"
 	UserInfoKey     = "_user_info_key"
+	//quota
+	QuotaSet             = "/quota/set"
+	QuotaUpdate          = "/quota/update"
+	QuotaDelete          = "/quota/delete"
+	QuotaList            = "/quota/list"
+	QuotaGet             = "/quota/get"
+	QuotaBatchModifyPath = "/quota/batchModifyPath"
+	QuotaListAll         = "/quota/listAll"
 )
 
 var GApiInfo map[string]string = map[string]string{
@@ -197,6 +226,7 @@ var GApiInfo map[string]string = map[string]string{
 	"adminsetnoderdonly":              AdminSetNodeRdOnly,
 	"adminsetdprdonly":                AdminSetDpRdOnly,
 	"admindatapartitionchangeleader":  AdminDataPartitionChangeLeader,
+	"adminsetdpdiscard":               AdminSetDpDiscard,
 	//"adminclusterapi":                 AdminClusterAPI,
 	//"adminuserapi":                    AdminUserAPI,
 	//"adminvolumeapi":                  AdminVolumeAPI,
@@ -216,48 +246,49 @@ var GApiInfo map[string]string = map[string]string{
 	"qosgetzonelimitinfo":    QosGetZoneLimitInfo,
 	"qosupdate":              QosUpdate,
 	//"qosupdatemagnify":               QosUpdateMagnify,
-	"qosupdateclientparam":           QosUpdateClientParam,
-	"qosupdatezonelimit":             QosUpdateZoneLimit,
-	"qosupload":                      QosUpload,
-	"qosupdatemasterlimit":           QosUpdateMasterLimit,
-	"addraftnode":                    AddRaftNode,
-	"removeraftnode":                 RemoveRaftNode,
-	"raftstatus":                     RaftStatus,
-	"adddatanode":                    AddDataNode,
-	"decommissiondatanode":           DecommissionDataNode,
-	"migratedatanode":                MigrateDataNode,
-	"canceldecommissiondatanode":     CancelDecommissionDataNode,
-	"decommissiondisk":               DecommissionDisk,
-	"getdatanode":                    GetDataNode,
-	"addmetanode":                    AddMetaNode,
-	"decommissionmetanode":           DecommissionMetaNode,
-	"migratemetanode":                MigrateMetaNode,
-	"getmetanode":                    GetMetaNode,
-	"adminupdatemetanode":            AdminUpdateMetaNode,
-	"adminupdatedatanode":            AdminUpdateDataNode,
-	"admingetinvalidnodes":           AdminGetInvalidNodes,
-	"adminloadmetapartition":         AdminLoadMetaPartition,
-	"admindiagnosemetapartition":     AdminDiagnoseMetaPartition,
-	"admindecommissionmetapartition": AdminDecommissionMetaPartition,
-	"adminchangemetapartitionleader": AdminChangeMetaPartitionLeader,
-	"adminaddmetareplica":            AdminAddMetaReplica,
-	"admindeletemetareplica":         AdminDeleteMetaReplica,
-	"getmetanodetaskresponse":        GetMetaNodeTaskResponse,
-	"getdatanodetaskresponse":        GetDataNodeTaskResponse,
-	"gettopologyview":                GetTopologyView,
-	"updatezone":                     UpdateZone,
-	"getallzones":                    GetAllZones,
-	"usercreate":                     UserCreate,
-	"userdelete":                     UserDelete,
-	"userupdate":                     UserUpdate,
-	"userupdatepolicy":               UserUpdatePolicy,
-	"userremovepolicy":               UserRemovePolicy,
-	"userdeletevolpolicy":            UserDeleteVolPolicy,
-	"usergetinfo":                    UserGetInfo,
-	"usergetakinfo":                  UserGetAKInfo,
-	"usertransfervol":                UserTransferVol,
-	"userlist":                       UserList,
-	"usersofvol":                     UsersOfVol,
+	"qosupdateclientparam":            QosUpdateClientParam,
+	"qosupdatezonelimit":              QosUpdateZoneLimit,
+	"qosupload":                       QosUpload,
+	"qosupdatemasterlimit":            QosUpdateMasterLimit,
+	"addraftnode":                     AddRaftNode,
+	"removeraftnode":                  RemoveRaftNode,
+	"raftstatus":                      RaftStatus,
+	"adddatanode":                     AddDataNode,
+	"decommissiondatanode":            DecommissionDataNode,
+	"migratedatanode":                 MigrateDataNode,
+	"canceldecommissiondatanode":      CancelDecommissionDataNode,
+	"decommissiondisk":                DecommissionDisk,
+	"getdatanode":                     GetDataNode,
+	"addmetanode":                     AddMetaNode,
+	"decommissionmetanode":            DecommissionMetaNode,
+	"migratemetanode":                 MigrateMetaNode,
+	"getmetanode":                     GetMetaNode,
+	"adminupdatemetanode":             AdminUpdateMetaNode,
+	"adminupdatedatanode":             AdminUpdateDataNode,
+	"admingetinvalidnodes":            AdminGetInvalidNodes,
+	"adminloadmetapartition":          AdminLoadMetaPartition,
+	"admindiagnosemetapartition":      AdminDiagnoseMetaPartition,
+	"admindecommissionmetapartition":  AdminDecommissionMetaPartition,
+	"adminchangemetapartitionleader":  AdminChangeMetaPartitionLeader,
+	"adminbalancemetapartitionleader": AdminBalanceMetaPartitionLeader,
+	"adminaddmetareplica":             AdminAddMetaReplica,
+	"admindeletemetareplica":          AdminDeleteMetaReplica,
+	"getmetanodetaskresponse":         GetMetaNodeTaskResponse,
+	"getdatanodetaskresponse":         GetDataNodeTaskResponse,
+	"gettopologyview":                 GetTopologyView,
+	"updatezone":                      UpdateZone,
+	"getallzones":                     GetAllZones,
+	"usercreate":                      UserCreate,
+	"userdelete":                      UserDelete,
+	"userupdate":                      UserUpdate,
+	"userupdatepolicy":                UserUpdatePolicy,
+	"userremovepolicy":                UserRemovePolicy,
+	"userdeletevolpolicy":             UserDeleteVolPolicy,
+	"usergetinfo":                     UserGetInfo,
+	"usergetakinfo":                   UserGetAKInfo,
+	"usertransfervol":                 UserTransferVol,
+	"userlist":                        UserList,
+	"usersofvol":                      UsersOfVol,
 }
 
 //const TimeFormat = "2006-01-02 15:04:05"
@@ -280,6 +311,25 @@ type RegisterMetaNodeResp struct {
 	ID uint64
 }
 
+type AclIpInfo struct {
+	Ip    string
+	CTime int64
+}
+
+type AclRsp struct {
+	Info    string
+	OK      bool
+	List    []*AclIpInfo
+	Reserve string
+}
+
+type UidSpaceRsp struct {
+	Info        string
+	OK          bool
+	UidSpaceArr []*UidSpaceInfo
+	Reserve     string
+}
+
 // ClusterInfo defines the cluster infomation.
 type ClusterInfo struct {
 	Cluster                     string
@@ -291,6 +341,8 @@ type ClusterInfo struct {
 	DirChildrenNumLimit         uint32
 	EbsAddr                     string
 	ServicePath                 string
+	ClusterUuid                 string
+	ClusterUuidEnable           bool
 }
 
 // CreateDataPartitionRequest defines the request to create a data partition.
@@ -401,6 +453,10 @@ type LoadMetaPartitionMetricResponse struct {
 	Result   string
 }
 
+type UidLimitToMetaNode struct {
+	UidLimitInfo []*UidSpaceInfo
+}
+
 type QosToDataNode struct {
 	EnableDiskQos     bool
 	QosIopsReadLimit  uint64
@@ -409,12 +465,19 @@ type QosToDataNode struct {
 	QosFlowWriteLimit uint64
 }
 
+type QuotaHeartBeatInfos struct {
+	QuotaHbInfos []*QuotaHeartBeatInfo
+}
+
 // HeartBeatRequest define the heartbeat request.
 type HeartBeatRequest struct {
 	CurrTime   int64
 	MasterAddr string
 	FLReadVols []string
 	QosToDataNode
+	FileStatsEnable bool
+	UidLimitToMetaNode
+	QuotaHeartBeatInfos
 }
 
 // PartitionReport defines the partition report.
@@ -458,17 +521,19 @@ type DataNodeHeartbeatResponse struct {
 
 // MetaPartitionReport defines the meta partition report.
 type MetaPartitionReport struct {
-	PartitionID uint64
-	Start       uint64
-	End         uint64
-	Status      int
-	Size        uint64
-	MaxInodeID  uint64
-	IsLeader    bool
-	VolName     string
-	InodeCnt    uint64
-	DentryCnt   uint64
-	FreeListLen uint64
+	PartitionID      uint64
+	Start            uint64
+	End              uint64
+	Status           int
+	Size             uint64
+	MaxInodeID       uint64
+	IsLeader         bool
+	VolName          string
+	InodeCnt         uint64
+	DentryCnt        uint64
+	FreeListLen      uint64
+	UidInfo          []*UidReportSpaceInfo
+	QuotaReportInfos []*QuotaReportInfo
 }
 
 // MetaNodeHeartbeatResponse defines the response to the meta node heartbeat request.
@@ -567,6 +632,7 @@ type DataPartitionResponse struct {
 	Epoch         uint64
 	IsRecover     bool
 	PartitionTTL  int64
+	IsDiscard     bool
 }
 
 // DataPartitionsView defines the view of a data partition
@@ -721,6 +787,11 @@ func NewLimitRsp2Client() *LimitRsp2Client {
 	return limit
 }
 
+type UidSimpleInfo struct {
+	UID     uint32
+	Limited bool
+}
+
 // SimpleVolView defines the simple view of a volume
 type SimpleVolView struct {
 	ID                    uint64
@@ -746,6 +817,8 @@ type SimpleVolView struct {
 	CreateTime            string
 	EnableToken           bool
 	EnablePosixAcl        bool
+	EnableTransaction     string
+	TxTimeout             int64
 	Description           string
 	DpSelectorName        string
 	DpSelectorParm        string
@@ -763,6 +836,7 @@ type SimpleVolView struct {
 	CacheTtl         int
 	CacheRule        string
 	PreloadCapacity  uint64
+	Uids             []UidSimpleInfo
 }
 
 type NodeSetInfo struct {

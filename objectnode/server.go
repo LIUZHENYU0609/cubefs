@@ -18,22 +18,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/cubefs/blobstore/api/access"
-	"github.com/cubefs/cubefs/blockcache/bcache"
-	"github.com/cubefs/cubefs/sdk/data/blobstore"
-	"github.com/cubefs/cubefs/util/config"
-	"github.com/cubefs/cubefs/util/exporter"
-	"github.com/hashicorp/consul/api"
 	"net/http"
 	"path"
 	"regexp"
 	"strings"
 	"sync"
 
+	"github.com/cubefs/cubefs/blobstore/api/access"
+	"github.com/cubefs/cubefs/blockcache/bcache"
 	"github.com/cubefs/cubefs/cmd/common"
 	"github.com/cubefs/cubefs/proto"
+	"github.com/cubefs/cubefs/sdk/data/blobstore"
 	"github.com/cubefs/cubefs/sdk/master"
+	"github.com/cubefs/cubefs/util/config"
+	"github.com/cubefs/cubefs/util/exporter"
 	"github.com/cubefs/cubefs/util/log"
+
 	"github.com/gorilla/mux"
 )
 
@@ -52,9 +52,9 @@ const (
 	// Example:
 	//		{
 	//			"masterAddr":[
-	//				"master1.chubao.io",
-	//				"master2.chubao.io",
-	//				"master3.chubao.io"
+	//				"master1.cube.io",
+	//				"master2.cube.io",
+	//				"master3.cube.io"
 	//			]
 	//		}
 	configMasterAddr = proto.MasterAddr
@@ -75,10 +75,10 @@ const (
 	// Example:
 	//		{
 	//			"domains": [
-	//				"object.chubao.io"
+	//				"object.cube.io"
 	//			]
 	//		}
-	// The configuration in the example will allow ObjectNode to automatically resolve "* .object.chubao.io".
+	// The configuration in the example will allow ObjectNode to automatically resolve "* .object.cube.io".
 	configDomains = "domains"
 
 	disabledActions               = "disabledActions"
@@ -275,7 +275,7 @@ func handleStart(s common.Server, cfg *config.Config) (err error) {
 	log.LogInfof("handleStart: get cluster information: region(%v)", o.region)
 	ebsClient, err = blobstore.NewEbsClient(access.Config{
 		ConnMode: access.NoLimitConnMode,
-		Consul: api.Config{
+		Consul: access.ConsulConfig{
 			Address: ci.EbsAddr,
 		},
 		//ServicePath:    ci.ServicePath,
@@ -322,8 +322,8 @@ func (o *ObjectNode) startMuxRestAPI() (err error) {
 	o.registerApiRouters(router)
 	router.Use(
 		o.expectMiddleware,
-		o.corsMiddleware,
 		o.traceMiddleware,
+		o.corsMiddleware,
 		o.authMiddleware,
 		o.policyCheckMiddleware,
 		o.contentMiddleware,

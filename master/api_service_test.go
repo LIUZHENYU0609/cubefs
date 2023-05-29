@@ -44,6 +44,7 @@ const (
 	mds3Addr          = "127.0.0.1:9103"
 	mds4Addr          = "127.0.0.1:9104"
 	mds5Addr          = "127.0.0.1:9105"
+	mds6Addr          = "127.0.0.1:9106"
 
 	mms1Addr      = "127.0.0.1:8101"
 	mms2Addr      = "127.0.0.1:8102"
@@ -77,10 +78,10 @@ func createDefaultMasterServerForTest() *Server {
 		"retainLogs":"20000",
 		"tickInterval":500,
 		"electionTick":6,
-		"logDir": "/tmp/chubaofs/Logs",
+		"logDir": "/tmp/cubefs/Logs",
 		"logLevel":"DEBUG",
-		"walDir":"/tmp/chubaofs/raft",
-		"storeDir":"/tmp/chubaofs/rocksdbstore",
+		"walDir":"/tmp/cubefs/raft",
+		"storeDir":"/tmp/cubefs/rocksdbstore",
 		"clusterName":"cubefs"
 	}`
 
@@ -94,16 +95,19 @@ func createDefaultMasterServerForTest() *Server {
 	addDataServer(mds3Addr, testZone2)
 	addDataServer(mds4Addr, testZone2)
 	addDataServer(mds5Addr, testZone2)
+	addDataServer(mds6Addr, testZone2)
+
 	// add meta node
 	addMetaServer(mms1Addr, testZone1)
 	addMetaServer(mms2Addr, testZone1)
 	addMetaServer(mms3Addr, testZone2)
 	addMetaServer(mms4Addr, testZone2)
 	addMetaServer(mms5Addr, testZone2)
-	time.Sleep(5 * time.Second)
+	addMetaServer(mms6Addr, testZone2)
+	time.Sleep(1 * time.Second)
 	testServer.cluster.checkDataNodeHeartbeat()
 	testServer.cluster.checkMetaNodeHeartbeat()
-	time.Sleep(5 * time.Second)
+	time.Sleep(1 * time.Second)
 	testServer.cluster.scheduleToUpdateStatInfo()
 	// set load factor
 	err = testServer.cluster.setClusterLoadFactor(100)
@@ -189,7 +193,7 @@ func createMasterServer(cfgJSON string) (server *Server, err error) {
 		level = log.ErrorLevel
 	}
 	if _, err = log.InitLog(logDir, "master", level, nil); err != nil {
-		fmt.Println("Fatal: failed to start the chubaofs daemon - ", err)
+		fmt.Println("Fatal: failed to start the cubefs daemon - ", err)
 		return
 	}
 	if profPort != "" {
@@ -644,6 +648,30 @@ func TestGetTopo(t *testing.T) {
 func TestGetMetaNode(t *testing.T) {
 	reqURL := fmt.Sprintf("%v%v?addr=%v", hostAddr, proto.GetMetaNode, mms1Addr)
 	process(reqURL, t)
+}
+
+func TestGetNodeInfo(t *testing.T) {
+	reqURL := fmt.Sprintf("%v%v", hostAddr, proto.AdminGetNodeInfo)
+	process(reqURL, t)
+}
+
+func TestSetNodeMaxDpCntLimit(t *testing.T) {
+	// change current max data partition count limit to 4000
+	limit := uint32(4000)
+	reqURL := fmt.Sprintf("%v%v?maxDpCntLimit=%v", hostAddr, proto.AdminSetNodeInfo, limit)
+	process(reqURL, t)
+	// query current settings
+	reqURL = fmt.Sprintf("%v%v", hostAddr, proto.AdminGetNodeInfo)
+	reply := process(reqURL, t)
+	data := reply.Data.(map[string]interface{})
+	limitStr := (data[maxDpCntLimitKey]).(string)
+	assert.True(t, fmt.Sprint(limit) == limitStr)
+	// query data node info
+	reqURL = fmt.Sprintf("%v%v?addr=%v", hostAddr, proto.GetDataNode, mds1Addr)
+	reply = process(reqURL, t)
+	data = reply.Data.(map[string]interface{})
+	dataNodeLimit := uint32((data[maxDpCntLimitKey]).(float64))
+	assert.True(t, dataNodeLimit == limit)
 }
 
 func TestAddDataReplica(t *testing.T) {

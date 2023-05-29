@@ -17,7 +17,10 @@ package metanode
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/cubefs/cubefs/util/config"
 	"net/http"
+	"os"
+	"path"
 	"strconv"
 
 	"bytes"
@@ -50,6 +53,7 @@ func (api *APIResponse) Marshal() ([]byte, error) {
 func (m *MetaNode) registerAPIHandler() (err error) {
 	http.HandleFunc("/getPartitions", m.getPartitionsHandler)
 	http.HandleFunc("/getPartitionById", m.getPartitionByIDHandler)
+	http.HandleFunc("/getLeaderPartitions", m.getLeaderPartitionsHandler)
 	http.HandleFunc("/getInode", m.getInodeHandler)
 	http.HandleFunc("/getExtentsByInode", m.getExtentsByInodeHandler)
 	http.HandleFunc("/getEbsExtentsByInode", m.getEbsExtentsByInodeHandler)
@@ -62,6 +66,7 @@ func (m *MetaNode) registerAPIHandler() (err error) {
 	http.HandleFunc("/getParams", m.getParamsHandler)
 	http.HandleFunc("/getSmuxStat", m.getSmuxStatHandler)
 	http.HandleFunc("/getRaftStatus", m.getRaftStatusHandler)
+	http.HandleFunc("/genClusterVersionFile", m.genClusterVersionFileHandler)
 	return
 }
 
@@ -132,6 +137,24 @@ func (m *MetaNode) getPartitionByIDHandler(w http.ResponseWriter, r *http.Reques
 	resp.Data = msg
 	resp.Code = http.StatusOK
 	resp.Msg = http.StatusText(http.StatusOK)
+}
+
+func (m *MetaNode) getLeaderPartitionsHandler(w http.ResponseWriter, r *http.Request) {
+	resp := NewAPIResponse(http.StatusOK, http.StatusText(http.StatusOK))
+	mps := m.metadataManager.GetLeaderPartitions()
+	resp.Data = mps
+	data, err := resp.Marshal()
+	if err != nil {
+		log.LogErrorf("json marshal error:%v", err)
+		resp.Code = http.StatusInternalServerError
+		resp.Msg = err.Error()
+		return
+	}
+	if _, err := w.Write(data); err != nil {
+		log.LogErrorf("[getPartitionsHandler] response %s", err)
+		resp.Code = http.StatusInternalServerError
+		resp.Msg = err.Error()
+	}
 }
 
 func (m *MetaNode) getAllInodesHandler(w http.ResponseWriter, r *http.Request) {
@@ -497,6 +520,34 @@ func (m *MetaNode) getDirectoryHandler(w http.ResponseWriter, r *http.Request) {
 	resp.Msg = p.GetResultMsg()
 	if len(p.Data) > 0 {
 		resp.Data = json.RawMessage(p.Data)
+	}
+	return
+}
+
+func (m *MetaNode) genClusterVersionFileHandler(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	resp := NewAPIResponse(http.StatusOK, "Generate cluster version file success")
+	defer func() {
+		data, _ := resp.Marshal()
+		if _, err := w.Write(data); err != nil {
+			log.LogErrorf("[genClusterVersionFileHandler] response %s", err)
+		}
+	}()
+	paths := make([]string, 0)
+	paths = append(paths, m.metadataDir, m.raftDir)
+	for _, p := range paths {
+		if _, err := os.Stat(path.Join(p, config.ClusterVersionFile)); err == nil || os.IsExist(err) {
+			resp.Code = http.StatusCreated
+			resp.Msg = "Cluster version file already exists in " + p
+			return
+		}
+	}
+	for _, p := range paths {
+		if err := config.CheckOrStoreClusterUuid(p, m.clusterUuid, true); err != nil {
+			resp.Code = http.StatusInternalServerError
+			resp.Msg = "Failed to create cluster version file in " + p
+			return
+		}
 	}
 	return
 }

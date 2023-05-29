@@ -68,6 +68,8 @@ const (
 	defaultRlimit uint64 = 1024000
 
 	UpdateConfInterval = 2 * time.Minute
+
+	MasterRetrys = 5
 )
 
 const (
@@ -89,7 +91,7 @@ const (
 	DynamicUDSNameFormat = "/tmp/CubeFS-fdstore-%v.sock"
 	DefaultUDSName       = "/tmp/CubeFS-fdstore.sock"
 
-	DefaultLogPath = "/var/log/chubaofs"
+	DefaultLogPath = "/var/log/cubefs"
 )
 
 var (
@@ -289,7 +291,14 @@ func main() {
 		os.Exit(1)
 	}
 	//load  conf from master
-	err = loadConfFromMaster(opt)
+	for retry := 0; retry < MasterRetrys; retry++ {
+		err = loadConfFromMaster(opt)
+		if err != nil {
+			time.Sleep(5 * time.Second * time.Duration(retry+1))
+		} else {
+			break
+		}
+	}
 	if err != nil {
 		err = errors.NewErrorf("parse mount opt from master failed: %v\n", err)
 		fmt.Println(err)
@@ -311,6 +320,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer log.LogFlush()
+
+	if _, err = os.Stat(opt.MountPoint); err != nil {
+		if err = os.Mkdir(opt.MountPoint, os.ModePerm); err != nil {
+			err = errors.NewErrorf("Init.MountPoint mkdir failed error %v\n", err)
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	}
 
 	_, err = stat.NewStatistic(opt.Logpath, LoggerPrefix, int64(stat.DefaultStatLogSize),
 		stat.DefaultTimeOutUs, true)
@@ -376,8 +393,15 @@ func main() {
 	}
 
 	registerInterceptedSignal(opt.MountPoint)
-
-	if err = checkPermission(opt); err != nil {
+	for retry := 0; retry < MasterRetrys; retry++ {
+		err = checkPermission(opt)
+		if err != nil {
+			time.Sleep(5 * time.Second * time.Duration(retry+1))
+		} else {
+			break
+		}
+	}
+	if err != nil {
 		err = errors.NewErrorf("check permission failed: %v", err)
 		syslog.Println(err)
 		log.LogFlush()
@@ -592,24 +616,25 @@ func mount(opt *proto.MountOptions) (fsConn *fuse.Conn, super *cfs.Super, err er
 	}
 
 	go func() {
+		var mc = master.NewMasterClientFromString(opt.Master, false)
 		t := time.NewTicker(UpdateConfInterval)
 		defer t.Stop()
 		for {
 			select {
 			case <-t.C:
-				log.LogDebugf("UpdateVolConf: start load conf from master")
-				var mc = master.NewMasterClientFromString(opt.Master, false)
+				log.LogDebugf("UpdateVolConf: load conf from master")
+
+				var volumeInfo *proto.SimpleVolView
+				volumeInfo, err = mc.AdminAPI().GetVolumeSimpleInfo(opt.Volname)
+				if err != nil {
+					return
+				}
+				super.SetTransaction(volumeInfo.EnableTransaction, volumeInfo.TxTimeout)
 				if proto.IsCold(opt.VolType) {
-					var volumeInfo *proto.SimpleVolView
-					volumeInfo, err = mc.AdminAPI().GetVolumeSimpleInfo(opt.Volname)
-					if err != nil {
-						return
-					}
 					super.CacheAction = volumeInfo.CacheAction
 					super.CacheThreshold = volumeInfo.CacheThreshold
 					super.EbsBlockSize = volumeInfo.ObjBlockSize
 				}
-
 			}
 		}
 	}()
@@ -672,7 +697,6 @@ func parseMountOption(cfg *config.Config) (*proto.MountOptions, error) {
 	if err != nil {
 		return nil, errors.Trace(err, "invalide mount point (%v) ", rawmnt)
 	}
-
 	opt.Volname = GlobalMountOptions[proto.VolName].GetString()
 	opt.Owner = GlobalMountOptions[proto.Owner].GetString()
 	opt.Master = GlobalMountOptions[proto.Master].GetString()
@@ -747,7 +771,11 @@ func parseMountOption(cfg *config.Config) (*proto.MountOptions, error) {
 
 func checkPermission(opt *proto.MountOptions) (err error) {
 	var mc = master.NewMasterClientFromString(opt.Master, false)
-
+	localIP, _ := ump.GetLocalIpAddr()
+	if info, err := mc.UserAPI().AclOperation(opt.Volname, localIP, util.AclCheckIP); err != nil || !info.OK {
+		syslog.Println(err)
+		return proto.ErrNoAclPermission
+	}
 	// Check user access policy is enabled
 	if opt.AccessKey != "" {
 		var userInfo *proto.UserInfo
@@ -819,6 +847,8 @@ func loadConfFromMaster(opt *proto.MountOptions) (err error) {
 	opt.EbsBlockSize = volumeInfo.ObjBlockSize
 	opt.CacheAction = volumeInfo.CacheAction
 	opt.CacheThreshold = volumeInfo.CacheThreshold
+	opt.EnableTransaction = volumeInfo.EnableTransaction
+	opt.TxTimeout = volumeInfo.TxTimeout
 
 	var clusterInfo *proto.ClusterInfo
 	clusterInfo, err = mc.AdminAPI().GetClusterInfo()

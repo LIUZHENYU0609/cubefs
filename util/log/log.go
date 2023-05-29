@@ -33,7 +33,7 @@ import (
 	"syscall"
 	"time"
 
-	blog "github.com/cubefs/blobstore/util/log"
+	blog "github.com/cubefs/cubefs/blobstore/util/log"
 )
 
 type Level uint8
@@ -678,7 +678,7 @@ func QosWriteDebugf(format string, v ...interface{}) {
 	if gLog == nil {
 		return
 	}
-	if UpdateLevel&gLog.level != gLog.level {
+	if DebugLevel&gLog.level != gLog.level {
 		return
 	}
 	s := fmt.Sprintf(format, v...)

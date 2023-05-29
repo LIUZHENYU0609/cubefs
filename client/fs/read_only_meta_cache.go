@@ -291,7 +291,7 @@ func (persistent_meta_cache *ReadOnlyMetaCache) PutDentry(parentInode uint64, de
 
 	// add new dentry to entry buffer
 	for _, dentry := range dentries {
-		if _, ok := persistent_dentry.EntryBuffer[dentry.Name]; !ok {
+		if _, ok := persistent_dentry.EntryBuffer[dentry.Name]; !ok && dentry.Name != "." && dentry.Name != ".." {
 			persistent_dentry.EntryBuffer[dentry.Name] = dentryData{
 				Type: dentry.Type,
 				Ino:  dentry.Inode,

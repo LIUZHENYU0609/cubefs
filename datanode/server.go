@@ -148,6 +148,8 @@ type DataNode struct {
 	diskIopsWriteLimit      uint64
 	diskFlowReadLimit       uint64
 	diskFlowWriteLimit      uint64
+	clusterUuid             string
+	clusterUuidEnable       bool
 }
 
 func NewServer() *DataNode {
@@ -339,10 +341,17 @@ func (s *DataNode) startSpaceManager(cfg *config.Config) (err error) {
 		path := arr[0]
 		fileInfo, err := os.Stat(path)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Stat disk path error: %s", err.Error()))
+			log.LogErrorf("Stat disk path [%v] error: [%s]", path, err)
+			continue
 		}
 		if !fileInfo.IsDir() {
 			return errors.New("Disk path is not dir")
+		}
+		if s.clusterUuidEnable {
+			if err = config.CheckOrStoreClusterUuid(path, s.clusterUuid, false); err != nil {
+				log.LogErrorf("CheckOrStoreClusterUuid failed: %v", err)
+				return errors.New(fmt.Sprintf("CheckOrStoreClusterUuid failed: %v", err.Error()))
+			}
 		}
 		reservedSpace, err := strconv.ParseUint(arr[1], 10, 64)
 		if err != nil {
@@ -417,6 +426,8 @@ func (s *DataNode) register(cfg *config.Config) {
 				continue
 			}
 			masterAddr := MasterClient.Leader()
+			s.clusterUuid = ci.ClusterUuid
+			s.clusterUuidEnable = ci.ClusterUuidEnable
 			s.clusterID = ci.Cluster
 			if LocalIP == "" {
 				LocalIP = string(ci.Ip)
@@ -476,24 +487,20 @@ func (s *DataNode) checkLocalPartitionMatchWithMaster() (lackPartitions []uint64
 	if len(dinfo.PersistenceDataPartitions) == 0 {
 		return
 	}
-	lackPartitionsNeedCheck := make([]uint64, 0)
+
 	for _, partitionID := range dinfo.PersistenceDataPartitions {
 		dp := s.space.Partition(partitionID)
 		if dp == nil {
-			lackPartitionsNeedCheck = append(lackPartitionsNeedCheck, partitionID)
+			lackPartitions = append(lackPartitions, partitionID)
 		}
 	}
 
-	if len(lackPartitionsNeedCheck) == 0 {
-		return
+	if len(lackPartitions) == 0 {
+		log.LogInfo("checkLocalPartitionMatchWithMaster no lack")
 	} else {
-		lackPartitions = make([]uint64, 0)
-		for _, lackPartitionID := range lackPartitionsNeedCheck {
-			lackPartitions = append(lackPartitions, lackPartitionID)
-		}
 		log.LogErrorf("checkLocalPartitionMatchWithMaster lack ids [%v]", lackPartitions)
-		return
 	}
+	return
 }
 
 func (s *DataNode) checkPartitionInMemoryMatchWithInDisk() (lackPartitions []uint64) {
@@ -535,6 +542,7 @@ func (s *DataNode) registerHandler() {
 	http.HandleFunc("/setMetricsDegrade", s.setMetricsDegrade)
 	http.HandleFunc("/getMetricsDegrade", s.getMetricsDegrade)
 	http.HandleFunc("/qosEnable", s.setQosEnable())
+	http.HandleFunc("/genClusterVersionFile", s.genClusterVersionFile)
 }
 
 func (s *DataNode) startTCPService() (err error) {

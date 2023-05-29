@@ -18,23 +18,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/cubefs/cubefs/util/stat"
+	"io/ioutil"
 	"math"
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
-
-	"strings"
 
 	"github.com/cubefs/cubefs/proto"
 	"github.com/cubefs/cubefs/util"
 	"github.com/cubefs/cubefs/util/cryptoutil"
 	"github.com/cubefs/cubefs/util/exporter"
 	"github.com/cubefs/cubefs/util/log"
+	"github.com/cubefs/cubefs/util/stat"
 )
 
 func apiToMetricsName(api string) (reqMetricName string) {
@@ -283,6 +283,152 @@ func (m *Server) clusterStat(w http.ResponseWriter, r *http.Request) {
 	sendOkReply(w, r, newSuccessHTTPReply(cs))
 }
 
+func (m *Server) UidOperate(w http.ResponseWriter, r *http.Request) {
+	var (
+		uid     uint64
+		err     error
+		volName string
+		vol     *Vol
+		op      uint64
+		value   string
+		capSize uint64
+		uidList []*proto.UidSpaceInfo
+		uidInfo *proto.UidSpaceInfo
+		ok      bool
+	)
+	if volName, err = extractName(r); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(err))
+		return
+	}
+
+	if value = r.FormValue(OperateKey); value == "" {
+		err = keyNotFound(OperateKey)
+		sendErrReply(w, r, newErrHTTPReply(err))
+	}
+
+	op, err = strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		err = fmt.Errorf("parseUintParam %s-%s is not legal, err %s", OperateKey, value, err.Error())
+		return
+	}
+
+	if op != util.UidLimitList {
+		if uid, err = extractUint64(r, UIDKey); err != nil {
+			err = keyNotFound(UIDKey)
+			sendErrReply(w, r, newErrHTTPReply(err))
+			return
+		}
+	}
+
+	if op == util.UidAddLimit {
+		if capSize, err = extractPositiveUint64(r, CapacityKey); err != nil {
+			err = keyNotFound(CapacityKey)
+			sendErrReply(w, r, newErrHTTPReply(err))
+			return
+		}
+	}
+
+	log.LogDebugf("uidOperate. name %v op %v uid %v", volName, op, uid)
+	if vol, err = m.cluster.getVol(volName); err != nil {
+		log.LogDebugf("aclOperate. name %v not found", volName)
+		sendErrReply(w, r, newErrHTTPReply(err))
+		return
+	}
+	ok = true
+	switch op {
+	case util.UidGetLimit:
+		ok, uidInfo = vol.uidSpaceManager.checkUid(uint32(uid))
+		uidList = append(uidList, uidInfo)
+	case util.AclAddIP:
+		ok = vol.uidSpaceManager.addUid(uint32(uid), capSize)
+	case util.AclDelIP:
+		ok = vol.uidSpaceManager.removeUid(uint32(uid))
+	case util.AclListIP:
+		uidList = vol.uidSpaceManager.listAll()
+	}
+
+	rsp := &proto.UidSpaceRsp{
+		OK:          ok,
+		UidSpaceArr: uidList,
+	}
+
+	_ = sendOkReply(w, r, newSuccessHTTPReply(rsp))
+	return
+}
+
+func (m *Server) aclOperate(w http.ResponseWriter, r *http.Request) {
+	var (
+		ip      string
+		err     error
+		volName string
+		vol     *Vol
+		op      uint64
+		value   string
+		ok, res bool
+		ipList  []*proto.AclIpInfo
+	)
+	if volName, err = extractName(r); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(err))
+		return
+	}
+
+	if value = r.FormValue(OperateKey); value == "" {
+		err = keyNotFound(OperateKey)
+		sendErrReply(w, r, newErrHTTPReply(err))
+	}
+
+	op, err = strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		err = fmt.Errorf("parseUintParam %s-%s is not legal, err %s", OperateKey, value, err.Error())
+		return
+	}
+
+	if op != util.AclListIP {
+		if ip = r.FormValue(IPKey); ip == "" {
+			err = keyNotFound(IPKey)
+			sendErrReply(w, r, newErrHTTPReply(err))
+		}
+	}
+
+	log.LogDebugf("aclOperate. name %v op %v ip %v", volName, op, ip)
+	if vol, err = m.cluster.getVol(volName); err != nil {
+		log.LogDebugf("aclOperate. name %v not found", volName)
+		sendErrReply(w, r, newErrHTTPReply(err))
+		return
+	}
+	ok = true
+	opAclRes := vol.aclMgr.aclOperate(op, ip)
+	switch op {
+	case util.AclCheckIP:
+		if ipList, res = opAclRes.([]*proto.AclIpInfo); !res {
+			sendErrReply(w, r, newErrHTTPReply(fmt.Errorf("inner error")))
+			return
+		}
+		if len(ipList) > 0 {
+			ok = false
+		}
+	case util.AclAddIP, util.AclDelIP:
+		if opAclRes != nil {
+			if err, res = opAclRes.(error); !res {
+				sendErrReply(w, r, newErrHTTPReply(fmt.Errorf("inner error")))
+				return
+			}
+		}
+	case util.AclListIP:
+		if ipList, res = opAclRes.([]*proto.AclIpInfo); !res {
+			sendErrReply(w, r, newErrHTTPReply(fmt.Errorf("inner error")))
+			return
+		}
+	}
+
+	rsp := &proto.AclRsp{
+		OK:   ok,
+		List: ipList,
+	}
+	_ = sendOkReply(w, r, newSuccessHTTPReply(rsp))
+	return
+}
+
 func (m *Server) getCluster(w http.ResponseWriter, r *http.Request) {
 	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminGetCluster))
 	defer func() {
@@ -448,6 +594,8 @@ func (m *Server) getIPAddr(w http.ResponseWriter, r *http.Request) {
 		Ip:                          strings.Split(r.RemoteAddr, ":")[0],
 		EbsAddr:                     m.bStoreAddr,
 		ServicePath:                 m.servicePath,
+		ClusterUuid:                 m.cluster.clusterUuid,
+		ClusterUuidEnable:           m.cluster.clusterUuidEnable,
 	}
 
 	sendOkReply(w, r, newSuccessHTTPReply(cInfo))
@@ -978,7 +1126,7 @@ func (m *Server) createDataPartition(w http.ResponseWriter, r *http.Request) {
 
 	lastTotalDataPartitions = len(vol.dataPartitions.partitions)
 	clusterTotalDataPartitions = m.cluster.getDataPartitionCount()
-	err = m.cluster.batchCreateDataPartition(vol, reqCreateCount)
+	err = m.cluster.batchCreateDataPartition(vol, reqCreateCount, false)
 	rstMsg = fmt.Sprintf(" createDataPartition succeeeds. "+
 		"clusterLastTotalDataPartitions[%v],vol[%v] has %v data partitions previously and %v data partitions now",
 		clusterTotalDataPartitions, volName, lastTotalDataPartitions, len(vol.dataPartitions.partitions))
@@ -1298,6 +1446,56 @@ func (m *Server) changeMetaPartitionLeader(w http.ResponseWriter, r *http.Reques
 	_ = sendOkReply(w, r, newSuccessHTTPReply(rstMsg))
 }
 
+// balance the leader meta partition in metaNodes which can select all cluster some zones or noteSet
+func (m *Server) balanceMetaPartitionLeader(w http.ResponseWriter, r *http.Request) {
+	var (
+		zonesKey     string
+		nodesetIdKey string
+		err          error
+	)
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminBalanceMetaPartitionLeader))
+	defer func() {
+		doStatAndMetric(proto.AdminBalanceMetaPartitionLeader, metric, err, nil)
+	}()
+	if zonesKey, nodesetIdKey, err = parseRequestToBalanceMetaPartition(r); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		log.LogErrorf("balanceMetaPartitionLeader.err %v", err)
+		return
+	}
+	log.LogInfof("zone:%v,nodesetId:%v", zonesKey, nodesetIdKey)
+
+	zonesM := make(map[string]struct{})
+	if zonesKey != "" {
+		zones := strings.Split(zonesKey, commaSplit)
+		for _, zone := range zones {
+			zonesM[zone] = struct{}{}
+		}
+	}
+
+	nodesetIdM := make(map[uint64]struct{})
+	if nodesetIdKey != "" {
+		nodesetIds := strings.Split(nodesetIdKey, commaSplit)
+		for _, nodeSetId := range nodesetIds {
+			id, err := strconv.ParseUint(nodeSetId, 10, 64)
+			if err != nil {
+				sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+				log.LogErrorf("balanceMetaPartitionLeader.err %v", err)
+				return
+			}
+			nodesetIdM[id] = struct{}{}
+		}
+	}
+	log.LogInfof("balanceMetaPartitionLeader zones[%v] length[%d], nodesetIds[%v] length[%d]", zonesKey, len(zonesM), nodesetIdKey, len(nodesetIdM))
+	err = m.cluster.balanceMetaPartitionLeader(zonesM, nodesetIdM)
+	if err != nil {
+		log.LogErrorf("balanceMetaPartitionLeader.err %v", err)
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+	rstMsg := fmt.Sprintf("balanceMetaPartitionLeader command sucess")
+	_ = sendOkReply(w, r, newSuccessHTTPReply(rstMsg))
+}
+
 // Decommission a data partition. This usually happens when disk error has been reported.
 // This function needs to be called manually by the admin.
 func (m *Server) decommissionDataPartition(w http.ResponseWriter, r *http.Request) {
@@ -1353,16 +1551,22 @@ func (m *Server) decommissionDataPartition(w http.ResponseWriter, r *http.Reques
 
 func (m *Server) diagnoseDataPartition(w http.ResponseWriter, r *http.Request) {
 	var (
-		err               error
-		rstMsg            *proto.DataPartitionDiagnosis
-		inactiveNodes     []string
-		corruptDps        []*DataPartition
-		lackReplicaDps    []*DataPartition
-		badReplicaDps     []*DataPartition
-		corruptDpIDs      []uint64
-		lackReplicaDpIDs  []uint64
-		badReplicaDpIDs   []uint64
-		badDataPartitions []badPartitionView
+		err                     error
+		rstMsg                  *proto.DataPartitionDiagnosis
+		inactiveNodes           []string
+		corruptDps              []*DataPartition
+		lackReplicaDps          []*DataPartition
+		badReplicaDps           []*DataPartition
+		repFileCountDifferDps   []*DataPartition
+		repUsedSizeDifferDps    []*DataPartition
+		excessReplicaDPs        []*DataPartition
+		corruptDpIDs            []uint64
+		lackReplicaDpIDs        []uint64
+		badReplicaDpIDs         []uint64
+		repFileCountDifferDpIDs []uint64
+		repUsedSizeDifferDpIDs  []uint64
+		excessReplicaDpIDs      []uint64
+		badDataPartitions       []badPartitionView
 	)
 	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminDiagnoseDataPartition))
 	defer func() {
@@ -1372,12 +1576,17 @@ func (m *Server) diagnoseDataPartition(w http.ResponseWriter, r *http.Request) {
 	corruptDpIDs = make([]uint64, 0)
 	lackReplicaDpIDs = make([]uint64, 0)
 	badReplicaDpIDs = make([]uint64, 0)
-	if inactiveNodes, corruptDps, err = m.cluster.checkCorruptDataPartitions(); err != nil {
+	repFileCountDifferDpIDs = make([]uint64, 0)
+	repUsedSizeDifferDpIDs = make([]uint64, 0)
+	excessReplicaDpIDs = make([]uint64, 0)
+
+	if inactiveNodes, err = m.cluster.checkInactiveDataNodes(); err != nil {
 		sendErrReply(w, r, newErrHTTPReply(err))
 		return
 	}
 
-	if lackReplicaDps, badReplicaDps, err = m.cluster.checkReplicaOfDataPartitions(); err != nil {
+	if lackReplicaDps, badReplicaDps, repFileCountDifferDps, repUsedSizeDifferDps, excessReplicaDPs, corruptDps, err =
+		m.cluster.checkReplicaOfDataPartitions(); err != nil {
 		sendErrReply(w, r, newErrHTTPReply(err))
 		return
 	}
@@ -1390,6 +1599,15 @@ func (m *Server) diagnoseDataPartition(w http.ResponseWriter, r *http.Request) {
 	for _, dp := range badReplicaDps {
 		badReplicaDpIDs = append(badReplicaDpIDs, dp.PartitionID)
 	}
+	for _, dp := range repFileCountDifferDps {
+		repFileCountDifferDpIDs = append(repFileCountDifferDpIDs, dp.PartitionID)
+	}
+	for _, dp := range repUsedSizeDifferDps {
+		repUsedSizeDifferDpIDs = append(repUsedSizeDifferDpIDs, dp.PartitionID)
+	}
+	for _, dp := range excessReplicaDPs {
+		excessReplicaDpIDs = append(excessReplicaDpIDs, dp.PartitionID)
+	}
 
 	badDataPartitions = m.cluster.getBadDataPartitionsView()
 	rstMsg = &proto.DataPartitionDiagnosis{
@@ -1398,9 +1616,16 @@ func (m *Server) diagnoseDataPartition(w http.ResponseWriter, r *http.Request) {
 		LackReplicaDataPartitionIDs: lackReplicaDpIDs,
 		BadDataPartitionIDs:         badDataPartitions,
 		BadReplicaDataPartitionIDs:  badReplicaDpIDs,
+		RepFileCountDifferDpIDs:     repFileCountDifferDpIDs,
+		RepUsedSizeDifferDpIDs:      repUsedSizeDifferDpIDs,
+		ExcessReplicaDpIDs:          excessReplicaDpIDs,
 	}
-	log.LogInfof("diagnose dataPartition[%v] inactiveNodes:[%v], corruptDpIDs:[%v], lackReplicaDpIDs:[%v], BadReplicaDataPartitionIDs[%v]",
-		m.cluster.Name, inactiveNodes, corruptDpIDs, lackReplicaDpIDs, badReplicaDpIDs)
+	log.LogInfof("diagnose dataPartition[%v] inactiveNodes:[%v], corruptDpIDs:[%v], "+
+		"lackReplicaDpIDs:[%v], BadReplicaDataPartitionIDs[%v], "+
+		"repFileCountDifferDpIDs:[%v], RepUsedSizeDifferDpIDs[%v], excessReplicaDpIDs[%v]",
+		m.cluster.Name, inactiveNodes, corruptDpIDs,
+		lackReplicaDpIDs, badReplicaDpIDs,
+		repFileCountDifferDpIDs, repUsedSizeDifferDpIDs, excessReplicaDpIDs)
 	sendOkReply(w, r, newSuccessHTTPReply(rstMsg))
 }
 
@@ -1487,13 +1712,48 @@ func (m *Server) markDeleteVol(w http.ResponseWriter, r *http.Request) {
 	sendOkReply(w, r, newSuccessHTTPReply(msg))
 }
 
+func (m *Server) checkReplicaNum(r *http.Request, vol *Vol, req *updateVolReq) (err error) {
+	var (
+		replicaNum int
+	)
+
+	if replicaNumStr := r.FormValue(replicaNumKey); replicaNumStr != "" {
+		if replicaNum, err = strconv.Atoi(replicaNumStr); err != nil {
+			err = unmatchedKey(replicaNumKey)
+			return
+		}
+	} else {
+		replicaNum = int(vol.dpReplicaNum)
+	}
+	req.replicaNum = replicaNum
+	if replicaNum != 0 && replicaNum != int(vol.dpReplicaNum) {
+		if replicaNum != int(vol.dpReplicaNum)-1 {
+			err = fmt.Errorf("replicaNum only need be reduced one replica one time")
+			return
+		}
+		if !proto.IsHot(vol.VolType) {
+			err = fmt.Errorf("vol type(%v) replicaNum cann't be changed", vol.VolType)
+			return
+		}
+		if ok, dpArry := vol.isOkUpdateRepCnt(); !ok {
+			err = fmt.Errorf("vol have dataPartitions[%v] with inconsistent dataPartitions cnt to volume's ", dpArry)
+			return
+		}
+	}
+
+	if req.replicaNum == 0 ||
+		((req.replicaNum == 1 || req.replicaNum == 2) && !req.followerRead) {
+		err = fmt.Errorf("replica or follower read status error")
+		return
+	}
+	return
+}
+
 func (m *Server) updateVol(w http.ResponseWriter, r *http.Request) {
 	var (
-		req          = &updateVolReq{}
-		vol          *Vol
-		err          error
-		replicaNum   int
-		followerRead bool
+		req = &updateVolReq{}
+		vol *Vol
+		err error
 	)
 	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminUpdateVol))
 	defer func() {
@@ -1514,16 +1774,12 @@ func (m *Server) updateVol(w http.ResponseWriter, r *http.Request) {
 		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
 		return
 	}
-
-	if vol.dpReplicaNum == 1 && !req.followRead {
-		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: "single replica must enable follower read"})
-	}
-	if followerRead, req.authenticate, err = parseBoolFieldToUpdateVol(r, vol); err != nil {
-		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+	if req.followerRead, req.authenticate, err = parseBoolFieldToUpdateVol(r, vol); err != nil {
 		return
 	}
-	if (replicaNum == 1 || replicaNum == 2) && !followerRead {
-		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: "single or two replica must enable follower read"})
+
+	if err = m.checkReplicaNum(r, vol, req); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
 		return
 	}
 
@@ -1532,25 +1788,35 @@ func (m *Server) updateVol(w http.ResponseWriter, r *http.Request) {
 	newArgs.zoneName = req.zoneName
 	newArgs.description = req.description
 	newArgs.capacity = req.capacity
-	newArgs.followerRead = req.followRead
+	newArgs.followerRead = req.followerRead
 	newArgs.authenticate = req.authenticate
 	newArgs.dpSelectorName = req.dpSelectorName
 	newArgs.dpSelectorParm = req.dpSelectorParm
 	newArgs.enablePosixAcl = req.enablePosixAcl
+	newArgs.enableTransaction = req.enableTransaction
+	newArgs.txTimeout = req.txTimeout
 	if req.coldArgs != nil {
 		newArgs.coldArgs = req.coldArgs
 	}
 
-	newArgs.dpReplicaNum = uint8(replicaNum)
+	newArgs.dpReplicaNum = uint8(req.replicaNum)
 	newArgs.dpReadOnlyWhenVolFull = req.dpReadOnlyWhenVolFull
 
-	log.LogInfof("[updateVolOut] name [%s], z1 [%s], z2[%s]", req.name, req.zoneName, vol.Name)
+	log.LogWarnf("[updateVolOut] name [%s], z1 [%s], z2[%s] replicaNum[%v]", req.name, req.zoneName, vol.Name, req.replicaNum)
 	if err = m.cluster.updateVol(req.name, req.authKey, newArgs); err != nil {
 		sendErrReply(w, r, newErrHTTPReply(err))
 		return
 	}
 
-	sendOkReply(w, r, newSuccessHTTPReply(fmt.Sprintf("update vol[%v] successfully\n", req.name)))
+	var response string
+
+	if hasTxParams(r) {
+		response = fmt.Sprintf("update vol[%v] successfully, txTimeout[%v] enableTransaction[%v]",
+			req.name, newArgs.txTimeout, proto.GetMaskString(newArgs.enableTransaction))
+	} else {
+		response = fmt.Sprintf("update vol[%v] successfully", req.name)
+	}
+	sendOkReply(w, r, newSuccessHTTPReply(response))
 }
 
 func (m *Server) volExpand(w http.ResponseWriter, r *http.Request) {
@@ -1645,6 +1911,10 @@ func (m *Server) checkCreateReq(req *createVolReq) (err error) {
 
 	if req.capacity == 0 {
 		return fmt.Errorf("vol capacity can't be zero, %d", req.capacity)
+	}
+
+	if req.size != 0 && req.size <= 10 {
+		return fmt.Errorf("datapartition size must be bigger than 10 G")
 	}
 
 	if proto.IsHot(req.volType) {
@@ -1839,7 +2109,7 @@ func (m *Server) getVolSimpleInfo(w http.ResponseWriter, r *http.Request) {
 	sendOkReply(w, r, newSuccessHTTPReply(volView))
 }
 
-func newSimpleView(vol *Vol) *proto.SimpleVolView {
+func newSimpleView(vol *Vol) (view *proto.SimpleVolView) {
 	var (
 		volInodeCount  uint64
 		volDentryCount uint64
@@ -1852,7 +2122,8 @@ func newSimpleView(vol *Vol) *proto.SimpleVolView {
 		volInodeCount = volInodeCount + mp.InodeCount
 	}
 	maxPartitionID := vol.maxPartitionID()
-	return &proto.SimpleVolView{
+
+	view = &proto.SimpleVolView{
 		ID:                    vol.ID,
 		Name:                  vol.Name,
 		Owner:                 vol.Owner,
@@ -1866,6 +2137,8 @@ func newSimpleView(vol *Vol) *proto.SimpleVolView {
 		Capacity:              vol.Capacity,
 		FollowerRead:          vol.FollowerRead,
 		EnablePosixAcl:        vol.enablePosixAcl,
+		EnableTransaction:     proto.GetMaskString(vol.enableTransaction),
+		TxTimeout:             vol.txTimeout,
 		NeedToLowerReplica:    vol.NeedToLowerReplica,
 		Authenticate:          vol.authenticate,
 		CrossZone:             vol.crossZone,
@@ -1891,6 +2164,16 @@ func newSimpleView(vol *Vol) *proto.SimpleVolView {
 		CacheRule:             vol.CacheRule,
 		PreloadCapacity:       vol.getPreloadCapacity(),
 	}
+
+	vol.uidSpaceManager.RLock()
+	defer vol.uidSpaceManager.RUnlock()
+	for _, uid := range vol.uidSpaceManager.uidInfo {
+		view.Uids = append(view.Uids, proto.UidSimpleInfo{
+			UID:     uid.Uid,
+			Limited: uid.Limited,
+		})
+	}
+	return
 }
 
 func checkIp(addr string) bool {
@@ -1998,6 +2281,7 @@ func (m *Server) getDataNode(w http.ResponseWriter, r *http.Request) {
 		PersistenceDataPartitions: dataNode.PersistenceDataPartitions,
 		BadDisks:                  dataNode.BadDisks,
 		RdOnly:                    dataNode.RdOnly,
+		MaxDpCntLimit:             dataNode.GetDpCntLimit(),
 	}
 
 	sendOkReply(w, r, newSuccessHTTPReply(dataNodeInfo))
@@ -2675,7 +2959,7 @@ func (m *Server) updateDataUseRatioHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if ratioVal == 0 || ratioVal > 1 {
-		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: "ratioVal is not legal"})
 		return
 	}
 
@@ -2887,14 +3171,22 @@ func (m *Server) getNodeInfoHandler(w http.ResponseWriter, r *http.Request) {
 
 func (m *Server) diagnoseMetaPartition(w http.ResponseWriter, r *http.Request) {
 	var (
-		err               error
-		rstMsg            *proto.MetaPartitionDiagnosis
-		inactiveNodes     []string
-		corruptMps        []*MetaPartition
-		lackReplicaMps    []*MetaPartition
-		corruptMpIDs      []uint64
-		lackReplicaMpIDs  []uint64
-		badMetaPartitions []badPartitionView
+		err                             error
+		rstMsg                          *proto.MetaPartitionDiagnosis
+		inactiveNodes                   []string
+		noLeaderMps                     []*MetaPartition
+		lackReplicaMps                  []*MetaPartition
+		badReplicaMps                   []*MetaPartition
+		excessReplicaMPs                []*MetaPartition
+		inodeCountNotEqualReplicaMps    []*MetaPartition
+		dentryCountNotEqualReplicaMps   []*MetaPartition
+		corruptMpIDs                    []uint64
+		lackReplicaMpIDs                []uint64
+		badReplicaMpIDs                 []uint64
+		excessReplicaMpIDs              []uint64
+		inodeCountNotEqualReplicaMpIDs  []uint64
+		dentryCountNotEqualReplicaMpIDs []uint64
+		badMetaPartitions               []badPartitionView
 	)
 	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminDiagnoseMetaPartition))
 	defer func() {
@@ -2903,27 +3195,53 @@ func (m *Server) diagnoseMetaPartition(w http.ResponseWriter, r *http.Request) {
 
 	corruptMpIDs = make([]uint64, 0)
 	lackReplicaMpIDs = make([]uint64, 0)
-	if inactiveNodes, corruptMps, err = m.cluster.checkCorruptMetaPartitions(); err != nil {
+	badReplicaMpIDs = make([]uint64, 0)
+	excessReplicaMpIDs = make([]uint64, 0)
+
+	if inactiveNodes, err = m.cluster.checkInactiveMetaNodes(); err != nil {
 		sendErrReply(w, r, newErrHTTPReply(err))
 	}
 
-	if lackReplicaMps, err = m.cluster.checkLackReplicaMetaPartitions(); err != nil {
+	if lackReplicaMps, noLeaderMps, badReplicaMps, excessReplicaMPs,
+		inodeCountNotEqualReplicaMps, dentryCountNotEqualReplicaMps, err = m.cluster.checkReplicaMetaPartitions(); err != nil {
 		sendErrReply(w, r, newErrHTTPReply(err))
 	}
-	for _, mp := range corruptMps {
+	for _, mp := range noLeaderMps {
 		corruptMpIDs = append(corruptMpIDs, mp.PartitionID)
 	}
 	for _, mp := range lackReplicaMps {
 		lackReplicaMpIDs = append(lackReplicaMpIDs, mp.PartitionID)
 	}
+	for _, mp := range badReplicaMps {
+		badReplicaMpIDs = append(badReplicaMpIDs, mp.PartitionID)
+	}
+	for _, mp := range excessReplicaMPs {
+		excessReplicaMpIDs = append(excessReplicaMpIDs, mp.PartitionID)
+	}
+
+	for _, mp := range inodeCountNotEqualReplicaMps {
+		inodeCountNotEqualReplicaMpIDs = append(inodeCountNotEqualReplicaMpIDs, mp.PartitionID)
+	}
+
+	for _, mp := range dentryCountNotEqualReplicaMps {
+		dentryCountNotEqualReplicaMpIDs = append(dentryCountNotEqualReplicaMpIDs, mp.PartitionID)
+	}
 	badMetaPartitions = m.cluster.getBadMetaPartitionsView()
 	rstMsg = &proto.MetaPartitionDiagnosis{
-		InactiveMetaNodes:           inactiveNodes,
-		CorruptMetaPartitionIDs:     corruptMpIDs,
-		LackReplicaMetaPartitionIDs: lackReplicaMpIDs,
-		BadMetaPartitionIDs:         badMetaPartitions,
+		InactiveMetaNodes:                          inactiveNodes,
+		CorruptMetaPartitionIDs:                    corruptMpIDs,
+		LackReplicaMetaPartitionIDs:                lackReplicaMpIDs,
+		BadMetaPartitionIDs:                        badMetaPartitions,
+		BadReplicaMetaPartitionIDs:                 badReplicaMpIDs,
+		ExcessReplicaMetaPartitionIDs:              excessReplicaMpIDs,
+		InodeCountNotEqualReplicaMetaPartitionIDs:  inodeCountNotEqualReplicaMpIDs,
+		DentryCountNotEqualReplicaMetaPartitionIDs: dentryCountNotEqualReplicaMpIDs,
 	}
-	log.LogInfof("diagnose metaPartition[%v] inactiveNodes:[%v], corruptMpIDs:[%v], lackReplicaMpIDs:[%v]", m.cluster.Name, inactiveNodes, corruptMpIDs, lackReplicaMpIDs)
+	log.LogInfof("diagnose metaPartition cluster[%v], inactiveNodes:[%v], corruptMpIDs:[%v], "+
+		"lackReplicaMpIDs:[%v], badReplicaMpIDs:[%v], excessReplicaDpIDs[%v] "+
+		"inodeCountNotEqualReplicaMpIDs[%v] dentryCountNotEqualReplicaMpIDs[%v]",
+		m.cluster.Name, inactiveNodes, corruptMpIDs, lackReplicaMpIDs, badReplicaMpIDs, excessReplicaMpIDs,
+		inodeCountNotEqualReplicaMpIDs, dentryCountNotEqualReplicaMpIDs)
 	sendOkReply(w, r, newSuccessHTTPReply(rstMsg))
 }
 
@@ -3675,6 +3993,54 @@ func (m *Server) getMetaPartitions(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+func (m *Server) putDataPartitions(w http.ResponseWriter, r *http.Request) {
+	var (
+		body []byte
+		name string
+		err  error
+	)
+	defer func() {
+		if err != nil {
+			sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		}
+	}()
+
+	if name, err = parseAndExtractName(r); err != nil {
+		return
+	}
+	if err = r.ParseForm(); err != nil {
+		return
+	}
+	if body, err = ioutil.ReadAll(r.Body); err != nil {
+		return
+	}
+	if !m.cluster.partition.IsRaftLeader() {
+
+		reply := &struct {
+			Code int32           `json:"code"`
+			Msg  string          `json:"msg"`
+			Data json.RawMessage `json:"data"`
+		}{}
+
+		if err = json.Unmarshal(body, reply); err != nil {
+			log.LogErrorf("putDataPartitions. umarshal error volName %v", name)
+			return
+		}
+		view := &proto.DataPartitionsView{}
+		if err = json.Unmarshal(reply.Data, view); err != nil {
+			log.LogErrorf("putDataPartitions. umarshal reply.Data error volName %v", name)
+			return
+		}
+
+		m.cluster.followerReadManager.updateVolViewFromLeader(name, view)
+		sendOkReply(w, r, newSuccessHTTPReply("success"))
+		return
+	} else {
+		err = fmt.Errorf("raft leader cann't be grant dps info")
+		log.LogErrorf("putDataPartitions. err %v", err)
+	}
+}
+
 // Obtain all the data partitions in a volume.
 func (m *Server) getDataPartitions(w http.ResponseWriter, r *http.Request) {
 	var (
@@ -3692,7 +4058,7 @@ func (m *Server) getDataPartitions(w http.ResponseWriter, r *http.Request) {
 		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
 		return
 	}
-	log.LogInfof("action[getDataPartitions] tmp is leader[%v]", m.cluster.partition.IsRaftLeader())
+	log.LogInfof("action[getDataPartitions] current is leader[%v]", m.cluster.partition.IsRaftLeader())
 	if !m.cluster.partition.IsRaftLeader() {
 		var ok bool
 		if body, ok = m.cluster.followerReadManager.getVolViewAsFollower(name); !ok {
@@ -3833,8 +4199,8 @@ func volStat(vol *Vol, countByMeta bool) (stat *proto.VolStatInfo) {
 
 func getMetaPartitionView(mp *MetaPartition) (mpView *proto.MetaPartitionView) {
 	mpView = proto.NewMetaPartitionView(mp.PartitionID, mp.Start, mp.End, mp.Status)
-	mp.Lock()
-	defer mp.Unlock()
+	mp.RLock()
+	defer mp.RUnlock()
 	for _, host := range mp.Hosts {
 		mpView.Members = append(mpView.Members, host)
 	}
@@ -3884,12 +4250,14 @@ func (m *Server) getMetaPartition(w http.ResponseWriter, r *http.Request) {
 		}
 		for i := 0; i < len(replicas); i++ {
 			replicas[i] = &proto.MetaReplicaInfo{
-				Addr:       mp.Replicas[i].Addr,
-				DomainAddr: mp.Replicas[i].metaNode.DomainAddr,
-				MaxInodeID: mp.Replicas[i].MaxInodeID,
-				ReportTime: mp.Replicas[i].ReportTime,
-				Status:     mp.Replicas[i].Status,
-				IsLeader:   mp.Replicas[i].IsLeader,
+				Addr:        mp.Replicas[i].Addr,
+				DomainAddr:  mp.Replicas[i].metaNode.DomainAddr,
+				MaxInodeID:  mp.Replicas[i].MaxInodeID,
+				ReportTime:  mp.Replicas[i].ReportTime,
+				Status:      mp.Replicas[i].Status,
+				IsLeader:    mp.Replicas[i].IsLeader,
+				InodeCount:  mp.Replicas[i].InodeCount,
+				DentryCount: mp.Replicas[i].DentryCount,
 			}
 		}
 		var mpInfo = &proto.MetaPartitionInfo{
@@ -4080,10 +4448,11 @@ func (m *Server) queryDecommissionToken(w http.ResponseWriter, r *http.Request) 
 		err error
 	)
 
-	metric := exporter.NewTPCnt("req_queryDecommissionToken")
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminQueryDecommissionToken))
 	defer func() {
-		metric.Set(err)
+		doStatAndMetric(proto.AdminQueryDecommissionToken, metric, err, nil)
 	}()
+
 	var stats []nodeSetDecommissionParallelStatus
 	zones := m.cluster.t.getAllZones()
 	for _, zone := range zones {
@@ -4099,6 +4468,11 @@ func (m *Server) queryDecommissionToken(w http.ResponseWriter, r *http.Request) 
 }
 
 func (m *Server) queryDecommissionLimit(w http.ResponseWriter, r *http.Request) {
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminQueryDecommissionLimit))
+	defer func() {
+		doStatAndMetric(proto.AdminQueryDecommissionLimit, metric, nil, nil)
+	}()
+
 	limit := m.cluster.DecommissionLimit
 	rstMsg := fmt.Sprintf("decommission limit is %v", limit)
 	log.LogDebugf("action[queryDecommissionLimit] %v", rstMsg)
@@ -4111,6 +4485,12 @@ func (m *Server) queryDataNodeDecoProgress(w http.ResponseWriter, r *http.Reques
 		err         error
 		dn          *DataNode
 	)
+
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.QueryDataNodeDecoProgress))
+	defer func() {
+		doStatAndMetric(proto.QueryDataNodeDecoProgress, metric, err, nil)
+	}()
+
 	if offLineAddr, err = parseReqToDecoDataNodeProgress(r); err != nil {
 		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
 		return
@@ -4212,4 +4592,480 @@ func (m *Server) setCheckDataReplicasEnable(w http.ResponseWriter, r *http.Reque
 	log.LogInfof("action[setCheckDataReplicasEnable] enable be set [%v]", enable)
 	sendOkReply(w, r, newSuccessHTTPReply(fmt.Sprintf(
 		"set checkDataReplicasEnable to [%v] successfully", enable)))
+}
+
+func (m *Server) setFileStats(w http.ResponseWriter, r *http.Request) {
+	var (
+		err    error
+		enable bool
+	)
+	if enable, err = parseAndExtractStatus(r); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+	oldValue := m.cluster.fileStatsEnable
+	m.cluster.fileStatsEnable = enable
+	if err = m.cluster.syncPutCluster(); err != nil {
+		m.cluster.fileStatsEnable = oldValue
+		log.LogErrorf("action[setFileStats] syncPutCluster failed %v", err)
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrPersistenceByRaft))
+		return
+	}
+	log.LogInfof("action[setFileStats] enable be set [%v]", enable)
+	sendOkReply(w, r, newSuccessHTTPReply(fmt.Sprintf(
+		"set setFileStats to [%v] successfully", enable)))
+}
+
+func (m *Server) getFileStats(w http.ResponseWriter, r *http.Request) {
+	sendOkReply(w, r, newSuccessHTTPReply(fmt.Sprintf(
+		"getFileStats enable value [%v]", m.cluster.fileStatsEnable)))
+}
+
+func (m *Server) GetClusterValue(w http.ResponseWriter, r *http.Request) {
+	result, err := m.cluster.fsm.store.SeekForPrefix([]byte(clusterPrefix))
+	if err != nil {
+		log.LogErrorf("action[GetClusterValue],err:%v", err.Error())
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrInternalError))
+		return
+	}
+	for _, value := range result {
+		cv := &clusterValue{}
+		if err = json.Unmarshal(value, cv); err != nil {
+			log.LogErrorf("action[GetClusterValue], unmarshal err:%v", err.Error())
+			sendErrReply(w, r, newErrHTTPReply(proto.ErrUnmarshalData))
+			return
+		}
+		sendOkReply(w, r, newSuccessHTTPReply(cv))
+	}
+}
+
+func (m *Server) setClusterUuidEnable(w http.ResponseWriter, r *http.Request) {
+	var (
+		err    error
+		enable bool
+	)
+
+	if m.cluster.clusterUuid == "" {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeInternalError, Msg: "no ClusterUuid, generate it first"})
+		return
+	}
+
+	if enable, err = parseAndExtractStatus(r); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+	oldValue := m.cluster.clusterUuidEnable
+	m.cluster.clusterUuidEnable = enable
+	if err = m.cluster.syncPutCluster(); err != nil {
+		m.cluster.clusterUuidEnable = oldValue
+		log.LogErrorf("action[setClusterUuidEnable] syncPutCluster failed %v", err)
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrPersistenceByRaft))
+		return
+	}
+
+	log.LogInfof("action[setClusterUuidEnable] enable be set [%v]", enable)
+	sendOkReply(w, r, newSuccessHTTPReply(fmt.Sprintf(
+		"set clusterUuIdEnable to [%v] successfully", enable)))
+}
+
+func (m *Server) generateClusterUuid(w http.ResponseWriter, r *http.Request) {
+	if m.cluster.clusterUuid != "" {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeInternalError, Msg: "The cluster already has a ClusterUuid"})
+	}
+	if err := m.cluster.generateClusterUuid(); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrInternalError))
+		return
+	}
+	sendOkReply(w, r, newSuccessHTTPReply(fmt.Sprintf(
+		"generate ClusterUUID [%v] successfully", m.cluster.clusterUuid)))
+}
+
+func (m *Server) getClusterUuid(w http.ResponseWriter, r *http.Request) {
+	sendOkReply(w, r, newSuccessHTTPReply(fmt.Sprintf(
+		"ClusterUUID [%v], enable value [%v]", m.cluster.clusterUuid, m.cluster.clusterUuidEnable)))
+}
+
+func (m *Server) setConfigHandler(w http.ResponseWriter, r *http.Request) {
+	var err error
+
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminSetConfig))
+	defer func() {
+		doStatAndMetric(proto.AdminSetConfig, metric, err, nil)
+	}()
+
+	key, value, err := parseSetConfigParam(r)
+	if err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	log.LogInfof("[setConfigHandler] set config key[%v], value[%v]", key, value)
+
+	err = m.setConfig(key, value)
+	if err != nil {
+		log.LogErrorf("[setConfigHandler] set config key[%v], value[%v], err (%s)", key, value, err.Error())
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	sendOkReply(w, r, newSuccessHTTPReply(fmt.Sprintf("set config key[%v], value[%v] success", key, value)))
+	return
+}
+
+func (m *Server) getConfigHandler(w http.ResponseWriter, r *http.Request) {
+	var err error
+
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.AdminGetConfig))
+	defer func() {
+		doStatAndMetric(proto.AdminGetConfig, metric, err, nil)
+	}()
+
+	key, err := parseGetConfigParam(r)
+	if err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	log.LogInfof("[getConfigHandler] get config key[%v]", key)
+	value, err := m.getConfig(key)
+	if err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	sendOkReply(w, r, newSuccessHTTPReply(value))
+}
+
+func (m *Server) setConfig(key string, value string) (err error) {
+	var metaPartitionInodeIdStep uint64
+	if key == cfgmetaPartitionInodeIdStep {
+		if metaPartitionInodeIdStep, err = strconv.ParseUint(value, 10, 64); err != nil {
+			return err
+		}
+		oldValue := m.config.MetaPartitionInodeIdStep
+		m.config.MetaPartitionInodeIdStep = metaPartitionInodeIdStep
+		if err = m.cluster.syncPutCluster(); err != nil {
+			m.config.MetaPartitionInodeIdStep = oldValue
+			log.LogErrorf("setConfig syncPutCluster fail err %v", err)
+			return err
+		}
+	} else {
+		err = keyNotFound("config")
+	}
+	return err
+}
+
+func (m *Server) getConfig(key string) (value string, err error) {
+
+	if key == cfgmetaPartitionInodeIdStep {
+		v := m.config.MetaPartitionInodeIdStep
+		value = strconv.FormatUint(v, 10)
+	} else {
+		err = keyNotFound("config")
+	}
+	return value, err
+}
+
+func (m *Server) SetQuota(w http.ResponseWriter, r *http.Request) {
+	var req = &proto.SetMasterQuotaReuqest{}
+	var (
+		err error
+		vol *Vol
+	)
+
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.QuotaSet))
+	defer func() {
+		doStatAndMetric(proto.QuotaSet, metric, err, map[string]string{exporter.Vol: req.VolName})
+	}()
+
+	if err = parserSetQuotaParam(r, req); err != nil {
+		log.LogErrorf("[SetQuota] set quota fail err [%v]", err)
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	if vol, err = m.cluster.getVol(req.VolName); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrVolNotExists))
+		return
+	}
+
+	if err = vol.quotaManager.setQuota(req); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(err))
+		return
+	}
+
+	msg := fmt.Sprintf("set quota successfully, req %v", req)
+	sendOkReply(w, r, newSuccessHTTPReply(msg))
+}
+
+func (m *Server) UpdateQuota(w http.ResponseWriter, r *http.Request) {
+	var req = &proto.UpdateMasterQuotaReuqest{}
+	var (
+		err error
+		vol *Vol
+	)
+	if err = parserUpdateQuotaParam(r, req); err != nil {
+		log.LogErrorf("[SetQuota] set quota fail err [%v]", err)
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+	if vol, err = m.cluster.getVol(req.VolName); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrVolNotExists))
+		return
+	}
+
+	if err = vol.quotaManager.updateQuota(req); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(err))
+		return
+	}
+
+	msg := fmt.Sprintf("update quota successfully, req %v", req)
+	sendOkReply(w, r, newSuccessHTTPReply(msg))
+}
+
+func (m *Server) DeleteQuota(w http.ResponseWriter, r *http.Request) {
+	var (
+		err      error
+		vol      *Vol
+		fullPath string
+		name     string
+	)
+
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.QuotaDelete))
+	defer func() {
+		doStatAndMetric(proto.QuotaDelete, metric, err, map[string]string{exporter.Vol: name})
+	}()
+
+	if name, fullPath, err = parseDeleteQuotaParam(r); err != nil {
+		log.LogErrorf("[DeleteQuota] del quota fail err [%v]", err)
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	if vol, err = m.cluster.getVol(name); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrVolNotExists))
+		return
+	}
+
+	if err = vol.quotaManager.deleteQuota(fullPath); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(err))
+		return
+	}
+
+	msg := fmt.Sprintf("delete quota successfully, vol [%v] fullPath [%v]", name, fullPath)
+	sendOkReply(w, r, newSuccessHTTPReply(msg))
+	return
+}
+
+func (m *Server) ListQuota(w http.ResponseWriter, r *http.Request) {
+	var (
+		err  error
+		vol  *Vol
+		resp *proto.ListMasterQuotaResponse
+		name string
+	)
+
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.QuotaList))
+	defer func() {
+		doStatAndMetric(proto.QuotaList, metric, err, map[string]string{exporter.Vol: name})
+	}()
+
+	if name, err = parseAndExtractName(r); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	if vol, err = m.cluster.getVol(name); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrVolNotExists))
+		return
+	}
+
+	resp = vol.quotaManager.listQuota()
+
+	log.LogInfof("list quota vol [%v] resp [%v] success.", name, *resp)
+
+	sendOkReply(w, r, newSuccessHTTPReply(resp))
+	return
+}
+
+func (m *Server) ListQuotaAll(w http.ResponseWriter, r *http.Request) {
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.QuotaListAll))
+	defer func() {
+		doStatAndMetric(proto.QuotaListAll, metric, nil, nil)
+	}()
+
+	volsInfo := m.cluster.listQuotaAll()
+	log.LogInfof("list all vol has quota [%v]", volsInfo)
+	sendOkReply(w, r, newSuccessHTTPReply(volsInfo))
+	return
+}
+
+func (m *Server) GetQuota(w http.ResponseWriter, r *http.Request) {
+	var (
+		err       error
+		vol       *Vol
+		name      string
+		fullPath  string
+		quotaInfo *proto.QuotaInfo
+	)
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.QuotaGet))
+	defer func() {
+		doStatAndMetric(proto.QuotaGet, metric, err, map[string]string{exporter.Vol: name})
+	}()
+
+	if name, fullPath, err = parseGetQuotaParam(r); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	if vol, err = m.cluster.getVol(name); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrVolNotExists))
+		return
+	}
+
+	if quotaInfo, err = vol.quotaManager.getQuota(fullPath); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(err))
+		return
+	}
+
+	log.LogInfof("get quota vol [%v] fullPath [%v] quotaInfo [%v] success.", name, fullPath, *quotaInfo)
+	sendOkReply(w, r, newSuccessHTTPReply(quotaInfo))
+	return
+}
+
+func (m *Server) BatchModifyQuotaFullPath(w http.ResponseWriter, r *http.Request) {
+	var (
+		name              string
+		body              []byte
+		changeFullPathMap map[uint32]string
+		err               error
+		vol               *Vol
+	)
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.QuotaGet))
+	defer func() {
+		doStatAndMetric(proto.QuotaBatchModifyPath, metric, err, map[string]string{exporter.Vol: name})
+	}()
+
+	if name, err = parseAndExtractName(r); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	if body, err = ioutil.ReadAll(r.Body); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+	changeFullPathMap = make(map[uint32]string)
+	if err = json.Unmarshal(body, &changeFullPathMap); err != nil {
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	if vol, err = m.cluster.getVol(name); err != nil {
+		sendErrReply(w, r, newErrHTTPReply(proto.ErrVolNotExists))
+		return
+	}
+
+	vol.quotaManager.batchModifyQuotaFullPath(changeFullPathMap)
+
+	log.LogInfof("BatchModifyQuotaFullPath vol [%v] changeFullPathMap [%v] success.", name, changeFullPathMap)
+	msg := fmt.Sprintf("BatchModifyQuotaFullPath successfully, vol [%v]", name)
+	sendOkReply(w, r, newSuccessHTTPReply(msg))
+}
+
+func parseSetDpDiscardParam(r *http.Request) (dpId uint64, rdOnly bool, err error) {
+	if err = r.ParseForm(); err != nil {
+		return
+	}
+
+	if dpId, err = extractDataPartitionID(r); err != nil {
+		err = fmt.Errorf("parseSetDpDiscardParam get dpid error %v", err)
+		return
+	}
+
+	val := r.FormValue(dpDiscardKey)
+	if val == "" {
+		err = fmt.Errorf("parseSetDpDiscardParam %s is empty", dpDiscardKey)
+		return
+	}
+
+	if rdOnly, err = strconv.ParseBool(val); err != nil {
+		err = fmt.Errorf("parseSetDpDiscardParam %s is not bool value %s", dpDiscardKey, val)
+		return
+	}
+
+	return
+}
+
+func (m *Server) setDpDiscard(partitionID uint64, isDiscard bool) (err error) {
+
+	var dp *DataPartition
+	if dp, err = m.cluster.getDataPartitionByID(partitionID); err != nil {
+		return fmt.Errorf("[setDpDiacard] getDataPartitionByID err(%s)", err.Error())
+	}
+	dp.RLock()
+	dp.IsDiscard = isDiscard
+	m.cluster.syncUpdateDataPartition(dp)
+	dp.RUnlock()
+
+	return
+}
+
+func (m *Server) setDpDiscardHandler(w http.ResponseWriter, r *http.Request) {
+	var (
+		dpId    uint64
+		discard bool
+		err     error
+	)
+
+	metric := exporter.NewTPCnt(apiToMetricsName(proto.QuotaGet))
+	defer func() {
+		doStatAndMetric(proto.AdminSetDpDiscard, metric, err, nil)
+	}()
+
+	dpId, discard, err = parseSetDpDiscardParam(r)
+	if err != nil {
+		log.LogInfof("[setDpDiscardHandler] set dp %v to discard(%v)", dpId, discard)
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	err = m.setDpDiscard(dpId, discard)
+	if err != nil {
+		log.LogErrorf("[setDpDiscardHandler] set dp %v to discard %v, err (%s)", dpId, discard, err.Error())
+		sendErrReply(w, r, &proto.HTTPReply{Code: proto.ErrCodeParamError, Msg: err.Error()})
+		return
+	}
+
+	msg := fmt.Sprintf("[setDpDiscardHandler] set dpid %v to discard(%v) success", dpId, discard)
+	log.LogInfo(msg)
+	sendOkReply(w, r, newSuccessHTTPReply(msg))
+	return
+}
+
+func (m *Server) queryBadDisks(w http.ResponseWriter, r *http.Request) {
+	var (
+		err   error
+		infos proto.BadDiskInfos
+	)
+
+	metric := exporter.NewTPCnt("req_queryBadDisks")
+	defer func() {
+		metric.Set(err)
+	}()
+
+	m.cluster.dataNodes.Range(func(addr, node interface{}) bool {
+		dataNode, ok := node.(*DataNode)
+		if !ok {
+			return true
+		}
+		for _, badDisk := range dataNode.BadDisks {
+			info := proto.BadDiskInfo{Address: dataNode.Addr, Path: badDisk}
+			infos.BadDisks = append(infos.BadDisks, info)
+		}
+
+		return true
+	})
+
+	sendOkReply(w, r, newSuccessHTTPReply(infos))
 }

@@ -15,6 +15,7 @@
 package fs
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -25,13 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cubefs/cubefs/util"
-	"github.com/cubefs/cubefs/util/auditlog"
-	"golang.org/x/net/context"
-
-	"github.com/hashicorp/consul/api"
-
-	"github.com/cubefs/blobstore/api/access"
+	"github.com/cubefs/cubefs/blobstore/api/access"
 	"github.com/cubefs/cubefs/blockcache/bcache"
 	"github.com/cubefs/cubefs/client/common"
 	"github.com/cubefs/cubefs/depends/bazil.org/fuse"
@@ -40,6 +35,8 @@ import (
 	"github.com/cubefs/cubefs/sdk/data/blobstore"
 	"github.com/cubefs/cubefs/sdk/data/stream"
 	"github.com/cubefs/cubefs/sdk/meta"
+	"github.com/cubefs/cubefs/util"
+	"github.com/cubefs/cubefs/util/auditlog"
 	"github.com/cubefs/cubefs/util/errors"
 	"github.com/cubefs/cubefs/util/log"
 	"github.com/cubefs/cubefs/util/ump"
@@ -104,15 +101,16 @@ var (
 	_ fs.FSStatfser = (*Super)(nil)
 )
 
-const BlobWriterIdleTimeoutPeriod = 10
-const DefaultTaskPoolSize = 30
+const (
+	BlobWriterIdleTimeoutPeriod = 10
+	DefaultTaskPoolSize         = 30
+)
 
 // NewSuper returns a new Super.
 func NewSuper(opt *proto.MountOptions) (s *Super, err error) {
-
 	s = new(Super)
-	var masters = strings.Split(opt.Master, meta.HostsSeparator)
-	var metaConfig = &meta.MetaConfig{
+	masters := strings.Split(opt.Master, meta.HostsSeparator)
+	metaConfig := &meta.MetaConfig{
 		Volume:          opt.Volname,
 		Owner:           opt.Owner,
 		Masters:         masters,
@@ -121,11 +119,15 @@ func NewSuper(opt *proto.MountOptions) (s *Super, err error) {
 		ValidateOwner:   opt.Authenticate || opt.AccessKey == "",
 		EnableSummary:   opt.EnableSummary && opt.EnableXattr,
 		MetaSendTimeout: opt.MetaSendTimeout,
+		UpdateQuota:     true,
+		//EnableTransaction: opt.EnableTransaction,
 	}
 	s.mw, err = meta.NewMetaWrapper(metaConfig)
 	if err != nil {
 		return nil, errors.Trace(err, "NewMetaWrapper failed!"+err.Error())
 	}
+
+	s.SetTransaction(opt.EnableTransaction, opt.TxTimeout)
 
 	s.volname = opt.Volname
 	s.masters = opt.Master
@@ -229,7 +231,7 @@ func NewSuper(opt *proto.MountOptions) (s *Super, err error) {
 		s.bc = bcache.NewBcacheClient()
 	}
 
-	var extentConfig = &stream.ExtentConfig{
+	extentConfig := &stream.ExtentConfig{
 		Volume:            opt.Volname,
 		Masters:           masters,
 		FollowerRead:      opt.FollowerRead,
@@ -258,7 +260,7 @@ func NewSuper(opt *proto.MountOptions) (s *Super, err error) {
 	if proto.IsCold(opt.VolType) {
 		s.ebsc, err = blobstore.NewEbsClient(access.Config{
 			ConnMode: access.NoLimitConnMode,
-			Consul: api.Config{
+			Consul: access.ConsulConfig{
 				Address: opt.EbsEndpoint,
 			},
 			MaxSizePutOnce: MaxSizePutOnce,
@@ -284,7 +286,6 @@ func NewSuper(opt *proto.MountOptions) (s *Super, err error) {
 		go s.scheduleFlush()
 	}
 	if s.mw.EnableSummary {
-
 		s.sc = NewSummaryCache(DefaultSummaryExpiration, MaxSummaryCache)
 	}
 
@@ -379,6 +380,7 @@ func (s *Super) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.
 func (s *Super) ClusterName() string {
 	return s.cluster
 }
+
 func (s *Super) GetRate(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(s.ec.GetRate()))
 }
@@ -508,9 +510,7 @@ func (s *Super) SetResume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Super) EnableAuditLog(w http.ResponseWriter, r *http.Request) {
-	var (
-		err error
-	)
+	var err error
 	if err = r.ParseForm(); err != nil {
 		auditlog.BuildFailureResp(w, http.StatusBadRequest, err.Error())
 		return
@@ -560,7 +560,6 @@ func (s *Super) EnableAuditLog(w http.ResponseWriter, r *http.Request) {
 			dir, logModule, logMaxSize)
 		auditlog.BuildSuccessResp(w, info)
 	}
-
 }
 
 func (s *Super) State() (state fs.FSStatType, sockaddr string) {
@@ -594,7 +593,6 @@ func (s *Super) loopSyncMeta() {
 }
 
 func (s *Super) syncMeta() <-chan struct{} {
-
 	finishC := make(chan struct{})
 	start := time.Now()
 	cacheLen := s.ic.lruList.Len()
@@ -735,4 +733,20 @@ func getDelInodes(src []uint64, act []*proto.InodeInfo) []uint64 {
 
 func (s *Super) Close() {
 	close(s.closeC)
+}
+
+func (s *Super) SetTransaction(txMaskStr string, timeout int64) {
+	//maskStr := proto.GetMaskString(txMask)
+	mask, err := proto.GetMaskFromString(txMaskStr)
+	if err != nil {
+		log.LogErrorf("SetTransaction: err[%v], op[%v], timeout[%v]", err, txMaskStr, timeout)
+		return
+	}
+
+	s.mw.EnableTransaction = mask
+	if timeout <= 0 {
+		timeout = proto.DefaultTransactionTimeout
+	}
+	s.mw.TxTimeout = timeout
+	log.LogDebugf("SetTransaction: mask[%v], op[%v], timeout[%v]", mask, txMaskStr, timeout)
 }

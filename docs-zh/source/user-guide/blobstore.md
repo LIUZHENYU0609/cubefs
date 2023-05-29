@@ -8,15 +8,14 @@
 
 ``` bash
 $ git clone https://github.com/cubefs/cubefs.git
-$ cd cubefs/blobstore
-$ source env.sh
-$ sh build.sh
+$ source build/cgo_env.sh
+$ make blobstore
 ```
 
-构建成功后，将在 `bin` 目录中生成以下可执行文件：
+构建成功后，将在 `build/bin/blobstore` 目录中生成以下可执行文件：
 
 ```text
-├── bin
+├── build/bin/blobstore
 │   ├── access
 │   ├── clustermgr
 │   ├── proxy
@@ -40,7 +39,6 @@ $ sh build.sh
     > [Kafka](https://kafka.apache.org/documentation/#basic_ops)
     >
     > [Consul](https://learn.hashicorp.com/tutorials/consul/get-started-install?in=consul/getting-started)
-    > （可选，支持consul）
 
 3.  **语言环境**
 
@@ -424,15 +422,15 @@ learner节点一般用于数据备份，故障恢复
 
 1.  编码策略: 常用策略表
 
-| 类别        | 描述                                                                                |
+| 类别       | 描述                                                                              |
 |-----------|-----------------------------------------------------------------------------------|
-| EC15P12   | {N: 15, M: 12, L: 0, AZCount: 3, PutQuorum: 24, GetQuorum: 0, MinShardSize: 2048} |
-| EC6P6     | {N: 06, M: 06, L: 0, AZCount: 3, PutQuorum: 11, GetQuorum: 0, MinShardSize: 2048} |
-| EC16P20L2 | {N: 16, M: 20, L: 2, AZCount: 2, PutQuorum: 34, GetQuorum: 0, MinShardSize: 2048} |
-| EC6P10L2  | {N: 06, M: 10, L: 2, AZCount: 2, PutQuorum: 14, GetQuorum: 0, MinShardSize: 2048} |
 | EC12P4    | {N: 12, M: 04, L: 0, AZCount: 1, PutQuorum: 15, GetQuorum: 0, MinShardSize: 2048} |
-| EC3P3     | {N: 6, M: 3, L: 3, AZCount: 3, PutQuorum: 9, GetQuorum: 0, MinShardSize: 2048}    |
-
+| EC3P3     | {N: 3,  M: 3,  L: 0, AZCount: 1, PutQuorum: 5, GetQuorum: 0, MinShardSize: 2048}  |
+| EC16P20L2 | {N: 16, M: 20, L: 2, AZCount: 2, PutQuorum: 34, GetQuorum: 0, MinShardSize: 2048} |
+| EC6P10L2  | {N: 6,  M: 10, L: 2, AZCount: 2, PutQuorum: 14, GetQuorum: 0, MinShardSize: 2048} |
+| EC12P9    | {N: 12, M: 9,  L: 0, AZCount: 3, PutQuorum: 20, GetQuorum: 0, MinShardSize: 2048} |
+| EC15P12   | {N: 15, M: 12, L: 0, AZCount: 3, PutQuorum: 24, GetQuorum: 0, MinShardSize: 2048} |
+| EC6P6     | {N: 6,  M: 6,  L: 0, AZCount: 3, PutQuorum: 11, GetQuorum: 0, MinShardSize: 2048} |
 
 其中
 - N: 数据块数量，M: 校验块数量， L: 本地校验块数量，AZCount: AZ数量

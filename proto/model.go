@@ -65,6 +65,7 @@ type DataNodeInfo struct {
 	PersistenceDataPartitions []uint64
 	BadDisks                  []string
 	RdOnly                    bool
+	MaxDpCntLimit             uint32 `json:"maxDpCntLimit"`
 }
 
 // MetaPartition defines the structure of a meta partition
@@ -90,12 +91,14 @@ type MetaPartitionInfo struct {
 
 // MetaReplica defines the replica of a meta partition
 type MetaReplicaInfo struct {
-	Addr       string
-	DomainAddr string
-	MaxInodeID uint64
-	ReportTime int64
-	Status     int8 // unavailable, readOnly, readWrite
-	IsLeader   bool
+	Addr        string
+	DomainAddr  string
+	MaxInodeID  uint64
+	ReportTime  int64
+	Status      int8 // unavailable, readOnly, readWrite
+	IsLeader    bool
+	InodeCount  uint64
+	DentryCount uint64
 }
 
 // ClusterView provides the view of a cluster.
@@ -214,6 +217,7 @@ type DataPartitionInfo struct {
 	SingleDecommissionStatus uint8
 	SingleDecommissionAddr   string
 	RdOnly                   bool
+	IsDiscard                bool
 }
 
 // FileInCore define file in data partition
@@ -252,18 +256,33 @@ type DataPartitionDiagnosis struct {
 	LackReplicaDataPartitionIDs []uint64
 	BadDataPartitionIDs         []BadPartitionView
 	BadReplicaDataPartitionIDs  []uint64
+	RepFileCountDifferDpIDs     []uint64
+	RepUsedSizeDifferDpIDs      []uint64
+	ExcessReplicaDpIDs          []uint64
 }
 
 // meta partition diagnosis represents the inactive meta nodes, corrupt meta partitions, and meta partitions lack of replicas
 type MetaPartitionDiagnosis struct {
-	InactiveMetaNodes           []string
-	CorruptMetaPartitionIDs     []uint64
-	LackReplicaMetaPartitionIDs []uint64
-	BadMetaPartitionIDs         []BadPartitionView
+	InactiveMetaNodes                          []string
+	CorruptMetaPartitionIDs                    []uint64
+	LackReplicaMetaPartitionIDs                []uint64
+	BadMetaPartitionIDs                        []BadPartitionView
+	BadReplicaMetaPartitionIDs                 []uint64
+	ExcessReplicaMetaPartitionIDs              []uint64
+	InodeCountNotEqualReplicaMetaPartitionIDs  []uint64
+	DentryCountNotEqualReplicaMetaPartitionIDs []uint64
 }
 
 type DecommissionProgress struct {
 	Status    uint32
 	Progress  string
 	FailedDps []uint64
+}
+
+type BadDiskInfo struct {
+	Address string
+	Path    string
+}
+type BadDiskInfos struct {
+	BadDisks []BadDiskInfo
 }

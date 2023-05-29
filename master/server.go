@@ -67,8 +67,6 @@ var (
 
 	useConnPool = true //for test
 	gConfig     *clusterConfig
-
-	maxDpCntOneNode = uint32(3000)
 )
 
 var overSoldFactor = defaultOverSoldFactor
@@ -98,14 +96,6 @@ func setOverSoldFactor(factor float32) {
 var (
 	volNameErr = errors.New("name can only start and end with number or letters, and len can't less than 3")
 )
-
-func dpCntOneNodeLimit() uint32 {
-	if maxDpCntOneNode <= 0 {
-		return 3000
-	}
-
-	return maxDpCntOneNode
-}
 
 // Server represents the server in a cluster
 type Server struct {
@@ -287,6 +277,13 @@ func (m *Server) checkConfig(cfg *config.Config) (err error) {
 		}
 	}
 
+	noLeaderReportInterval := cfg.GetString(noLeaderReportInterval)
+	if noLeaderReportInterval != "" {
+		if m.config.NoLeaderReportInterval, err = strconv.ParseInt(noLeaderReportInterval, 10, 0); err != nil {
+			return fmt.Errorf("%v,err:%v", proto.ErrInvalidCfg, err.Error())
+		}
+	}
+
 	dataPartitionTimeOutSec := cfg.GetString(dataPartitionTimeOutSec)
 	if dataPartitionTimeOutSec != "" {
 		if m.config.DataPartitionTimeOutSec, err = strconv.ParseInt(dataPartitionTimeOutSec, 10, 0); err != nil {
@@ -308,6 +305,7 @@ func (m *Server) checkConfig(cfg *config.Config) (err error) {
 			return fmt.Errorf("%v,err:%v", proto.ErrInvalidCfg, err.Error())
 		}
 	}
+
 	m.tickInterval = int(cfg.GetFloat(cfgTickInterval))
 	m.raftRecvBufSize = int(cfg.GetInt(cfgRaftRecvBufSize))
 	m.electionTick = int(cfg.GetFloat(cfgElectionTick))
@@ -316,6 +314,13 @@ func (m *Server) checkConfig(cfg *config.Config) (err error) {
 	}
 	if m.electionTick <= 3 {
 		m.electionTick = 5
+	}
+
+	maxQuotaNumPerVol := cfg.GetString(cfgMaxQuotaNumPerVol)
+	if maxQuotaNumPerVol != "" {
+		if m.config.MaxQuotaNumPerVol, err = strconv.Atoi(maxQuotaNumPerVol); err != nil {
+			return fmt.Errorf("%v,err:%v", proto.ErrInvalidCfg, err.Error())
+		}
 	}
 	return
 }

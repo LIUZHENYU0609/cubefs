@@ -69,6 +69,8 @@ type MetaNode struct {
 	tickInterval      int
 	raftRecvBufSize   int
 	connectionCnt     int64
+	clusterUuid       string
+	clusterUuidEnable bool
 
 	control common.Control
 }
@@ -109,8 +111,12 @@ func (m *MetaNode) checkLocalPartitionMatchWithMaster() (err error) {
 	if len(lackPartitions) == 0 {
 		return
 	}
-	err = fmt.Errorf("LackPartitions %v on metanode %v,metanode cannot start", lackPartitions, m.localAddr+":"+m.listen)
-	log.LogErrorf(err.Error())
+	m.metrics.MetricMetaFailedPartition.SetWithLabels(float64(1), map[string]string{
+		"partids": fmt.Sprintf("%v", lackPartitions),
+		"node":    m.localAddr + ":" + m.listen,
+		"nodeid":  fmt.Sprintf("%d", m.nodeId),
+	})
+	log.LogErrorf("LackPartitions %v on metanode %v, please deal quickly", lackPartitions, m.localAddr+":"+m.listen)
 	return
 }
 
@@ -156,7 +162,7 @@ func doStart(s common.Server, cfg *config.Config) (err error) {
 		exporter.Warning(err.Error())
 		return
 	}
-
+	go m.startUpdateInodeQuota()
 	exporter.RegistConsul(m.clusterId, cfg.GetString("role"), cfg)
 	return
 }
@@ -241,17 +247,6 @@ func (m *MetaNode) parseConfig(cfg *config.Config) (err error) {
 	}
 	if m.raftReplicatePort == "" {
 		return fmt.Errorf("bad cfgRaftReplicaPort config")
-	}
-
-	constCfg := config.ConstConfig{
-		Listen:           m.listen,
-		RaftHeartbetPort: m.raftHeartbeatPort,
-		RaftReplicaPort:  m.raftReplicatePort,
-	}
-	var ok = false
-	if ok, err = config.CheckOrStoreConstCfg(m.metadataDir, config.DefaultConstConfigFile, &constCfg); !ok {
-		log.LogErrorf("constCfg check failed %v %v %v %v", m.metadataDir, config.DefaultConstConfigFile, constCfg, err)
-		return fmt.Errorf("constCfg check failed %v %v %v %v", m.metadataDir, config.DefaultConstConfigFile, constCfg, err)
 	}
 
 	log.LogInfof("[parseConfig] load localAddr[%v].", m.localAddr)
@@ -341,6 +336,25 @@ func (m *MetaNode) newMetaManager() (err error) {
 			return
 		}
 	}
+
+	if m.clusterUuidEnable {
+		if err = config.CheckOrStoreClusterUuid(m.metadataDir, m.clusterUuid, false); err != nil {
+			log.LogErrorf("CheckOrStoreClusterUuid failed: %v", err)
+			return fmt.Errorf("CheckOrStoreClusterUuid failed: %v", err)
+		}
+	}
+
+	constCfg := config.ConstConfig{
+		Listen:           m.listen,
+		RaftHeartbetPort: m.raftHeartbeatPort,
+		RaftReplicaPort:  m.raftReplicatePort,
+	}
+	var ok = false
+	if ok, err = config.CheckOrStoreConstCfg(m.metadataDir, config.DefaultConstConfigFile, &constCfg); !ok {
+		log.LogErrorf("constCfg check failed %v %v %v %v", m.metadataDir, config.DefaultConstConfigFile, constCfg, err)
+		return fmt.Errorf("constCfg check failed %v %v %v %v", m.metadataDir, config.DefaultConstConfigFile, constCfg, err)
+	}
+
 	// load metadataManager
 	conf := MetadataManagerConfig{
 		NodeID:    m.nodeId,
@@ -378,6 +392,8 @@ func (m *MetaNode) register() (err error) {
 			if m.localAddr == "" {
 				m.localAddr = clusterInfo.Ip
 			}
+			m.clusterUuid = clusterInfo.ClusterUuid
+			m.clusterUuidEnable = clusterInfo.ClusterUuidEnable
 			m.clusterId = clusterInfo.Cluster
 			nodeAddress = m.localAddr + ":" + m.listen
 			step++
